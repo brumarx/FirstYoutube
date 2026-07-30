@@ -126,9 +126,27 @@ async function tick(state) {
       log('⚠️ não deu pra confirmar se sou o primeiro, assumindo que não:', err.message);
     }
 
-    const msg =
+    let msg =
       (await generateMessage(souRealmentePrimeiro)) ??
       NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
+
+    // a geração pelo LLM leva alguns segundos — alguém pode ter comentado nesse
+    // meio-tempo, tornando falsa a alegação de "primeiro" checada lá em cima.
+    // Reconfirma bem em cima da hora de postar, o mais perto possível do insert real.
+    if (souRealmentePrimeiro) {
+      try {
+        const aindaVazio = (await countLiveChatMessages(details.activeLiveChatId, accessToken)) === 0;
+        if (!aindaVazio) {
+          souRealmentePrimeiro = false;
+          msg = NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
+        }
+      } catch {
+        // não deu pra reconfirmar → não arrisca alegar algo que pode não ser mais verdade
+        souRealmentePrimeiro = false;
+        msg = NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
+      }
+    }
+
     await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
     log(`✅ mensagem postada (primeiro=${souRealmentePrimeiro}): ${msg}`);
 
