@@ -1,0 +1,19 @@
+# Bot: comenta no chat ao vivo do @SetorVisitante quando a live começa e
+# periodicamente durante a transmissão. Ver scripts/youtube-live-comment.mjs.
+[Unit]
+Description=SetorVisitante — bot de comentários no live chat do YouTube
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=brmx
+WorkingDirectory=/home/brmx/SetorVisitante
+ExecStart=/usr/bin/node /home/brmx/SetorVisitante/scripts/youtube-live-comment.mjs
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/home/brmx/SetorVisitante/data/live-comment.log
+StandardError=append:/home/brmx/SetorVisitante/data/live-comment.log
+
+[Install]
+WantedBy=multi-user.target

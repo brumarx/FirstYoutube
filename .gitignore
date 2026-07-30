@@ -1,0 +1,6 @@
+# Segredos / credenciais — NUNCA versionar
+client_secret_*.json
+data/
+.claude/settings.local.json
+*.log
+node_modules/
