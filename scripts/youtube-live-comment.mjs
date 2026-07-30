@@ -25,8 +25,8 @@ const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
 
 const HANDLE = '@SetorVisitante';
 const POLL_INTERVAL_MS = 30_000; // checa se entrou ao vivo (sem custo de cota)
-const COMMENT_INTERVAL_MS = 5 * 60_000; // intervalo entre comentários "interessantes"
-const MAX_MESSAGES_PER_STREAM = 10;
+const COMMENT_INTERVAL_MS = 12 * 60_000; // intervalo entre comentários "interessantes" — espaçado, sem spammar o chat
+const MAX_MESSAGES_PER_STREAM = 6;
 
 // A diferença de horário Sesimbra x Brasil varia (~3-5h, depende do horário de
 // verão de cada lado), então só afirmamos "madrugada" quando é realmente tarde
@@ -41,17 +41,17 @@ function ehMadrugadaEmSesimbra() {
 }
 
 const FIRST_FALLBACK_BASE = [
-  'EHHHHHHHHHHH primeiro a entrar dessa vez! Vamo Fogão! ⭐🖤',
-  'CHEGUEI PRIMEIRO DE NOVO! Bora Botafogo! 🔥⭐',
-  'Primeiro a entrar, alvinegro até debaixo d\'água! 🖤🤍',
-  'Opa Dep, cheguei primeiro! Bora Fogão! 🖤🤍',
-  'EHHHHHHHH primeiro direto de Sesimbra, Portugal! ⭐🖤',
+  'EHHHHHHHHHHH primeiro a entrar dessa vez! Vamo Fogão!',
+  'CHEGUEI PRIMEIRO DE NOVO! Bora Botafogo!',
+  'Primeiro a entrar, alvinegro até debaixo d\'água!',
+  'Opa Dep, cheguei primeiro! Bora Fogão!',
+  'EHHHHHHHH primeiro direto de Sesimbra, Portugal!',
 ];
 
 const FIRST_FALLBACK_MADRUGADA = [
-  'EHHHHHHHH primeiro de Sesimbra, já tá de madrugada aqui e eu não perco! ⭐🖤',
-  'Opa Dep, cheguei primeiro! Bora Fogão, mesmo de madrugada em Portugal! 🖤🤍',
-  'PRIMEIRO DE NOVO, direto de Sesimbra e já são tantas da manhã aqui, mas Botafogo é Botafogo! 🔥',
+  'EHHHHHHHH primeiro de Sesimbra, já tá de madrugada aqui e eu não perco!',
+  'Opa Dep, cheguei primeiro! Bora Fogão, mesmo de madrugada em Portugal!',
+  'PRIMEIRO DE NOVO, direto de Sesimbra e já são tantas da manhã aqui, mas Botafogo é Botafogo!',
 ];
 
 function firstFallbackPool() {
@@ -61,9 +61,9 @@ function firstFallbackPool() {
 // Fallback genérico pro momento em que a live começa mas NÃO temos certeza de
 // sermos os primeiros (chat já tinha mensagens) — nunca alega "primeiro" aqui.
 const NORMAL_FALLBACK = [
-  'Chegueiii! Bora Botafogo, vamo com tudo! ⭐🖤',
-  'Presente! Vamo Fogão, hoje é dia de fumaça! 🔥⭐',
-  'Tá todo mundo aqui já? Vamo Botafogo, alvinegro até debaixo d\'água! 🖤🤍',
+  'Chegueiii! Bora Botafogo, vamo com tudo!',
+  'Presente! Vamo Fogão, hoje é dia de fumaça!',
+  'Tá todo mundo aqui já? Vamo Botafogo, alvinegro até debaixo d\'água!',
 ];
 
 function log(...args) {
