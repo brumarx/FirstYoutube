@@ -139,22 +139,28 @@ async function buscarJogoReal(): Promise<JogoReal | null> {
 }
 
 /**
- * Título real de um vídeo recente do próprio canal — é notícia genuína do
+ * Título real do vídeo MAIS RECENTE do próprio canal — é notícia genuína do
  * Botafogo-RJ (nem sempre sobre placar de jogo: pode ser mercado da bola,
  * bastidores, etc.), sem risco de hallucination porque é o título verbatim.
+ * Só usa se publicado há pouco tempo (48h): pegar um título aleatório entre
+ * os últimos já causou o bot comentar como novidade algo que já tinha mudado
+ * (ex.: falou preocupado sobre um "transferban" desatualizado), parecendo
+ * desinformado pra quem via a live ao vivo.
  */
 async function buscarNoticiaCanal(): Promise<string | null> {
   try {
     const accessToken = await getAccessToken();
-    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${CHANNEL_ID}&type=video&order=date&maxResults=8`;
+    const url = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${CHANNEL_ID}&type=video&order=date&maxResults=1`;
     const res = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
     const data = await res.json();
     if (!res.ok) return null;
-    const titulos: string[] = (data.items ?? [])
-      .map((it: { snippet?: { title?: string } }) => it.snippet?.title)
-      .filter((t: unknown): t is string => Boolean(t));
-    if (titulos.length === 0) return null;
-    return titulos[Math.floor(Math.random() * titulos.length)] ?? null;
+    const item = data.items?.[0];
+    const titulo: string | undefined = item?.snippet?.title;
+    const publicadoEm: string | undefined = item?.snippet?.publishedAt;
+    if (!titulo || !publicadoEm) return null;
+    const horasDesdePublicacao = (Date.now() - new Date(publicadoEm).getTime()) / 3_600_000;
+    if (horasDesdePublicacao > 48) return null; // velho demais, pode já estar desatualizado
+    return titulo;
   } catch {
     return null;
   }
@@ -186,9 +192,9 @@ async function main(): Promise<void> {
     };
     humorTexto = regraHumor[jogoReal.humor];
   } else if (noticiaCanal) {
-    regraDados = `Título REAL de uma notícia recente do canal sobre o Botafogo (use só isso, não invente detalhes além do que o título diz): "${noticiaCanal}"`;
+    regraDados = `Título REAL de uma notícia recente do canal sobre o Botafogo (use só isso, não invente detalhes além do que o título diz, e não afirme que sabe como a situação evoluiu ou terminou — pode já ter mudado desde a publicação): "${noticiaCanal}"`;
     humorTexto =
-      'Leia o tom desse título e reaja condizente: se soar como notícia boa pro Botafogo, fique feliz/animado; se soar como notícia ruim, fique um pouco chateado (sem drama, sem hostilidade); se for neutra, comente de forma neutra.';
+      'Leia o tom desse título e reaja de forma BREVE e CAUTELOSA, sem tirar conclusões fortes nem alarmismo: se soar como notícia boa pro Botafogo, fique um pouco animado; se soar como notícia ruim, fique só levemente preocupado (sem drama, sem afirmar certezas sobre o desfecho); se for neutra, comente de forma neutra.';
   } else {
     regraDados = `Não há dado de jogo nem notícia recente disponível agora. Use este fato real e atemporal: ${fatoFallback}. NÃO invente nenhum placar, jogador atual ou notícia recente — fale só sobre esse fato.`;
     humorTexto = 'Tom neutro e tranquilo, sem exagero de humor.';
