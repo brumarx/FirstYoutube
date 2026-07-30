@@ -4,3 +4,4 @@ data/
 .claude/settings.local.json
 *.log
 node_modules/
+.code-graph/
