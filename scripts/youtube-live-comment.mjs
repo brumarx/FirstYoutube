@@ -102,13 +102,20 @@ async function tick(state) {
     const liveVideoId = await checkChannelLive(HANDLE);
     if (!liveVideoId) return state;
 
-    log(`🔴 ao vivo detectado: ${liveVideoId}`);
     const accessToken = await getAccessToken();
     const details = await getLiveStreamingDetails(liveVideoId, accessToken);
     if (!details?.activeLiveChatId) {
       log('sem activeLiveChatId ainda, tenta de novo no próximo ciclo');
       return state;
     }
+    // chat costuma abrir bem antes da transmissão real (vídeo ainda "upcoming"),
+    // postar nessa sala de espera falha às vezes e gastaria comentário à toa.
+    if (!details.isReallyLive) {
+      log(`⏳ ${liveVideoId} ainda em pré-show (sala de espera), aguardando começar de verdade`);
+      return state;
+    }
+
+    log(`🔴 ao vivo de verdade: ${liveVideoId}`);
 
     // só afirma "primeiro" se o chat estiver mesmo vazio ainda (verificado via API,
     // não assumido) — senão posta um comentário normal, sem alegar algo que não sabemos.
@@ -142,6 +149,7 @@ async function tick(state) {
   }
 
   const dueForComment =
+    details.isReallyLive &&
     state.messagesSent < MAX_MESSAGES_PER_STREAM &&
     Date.now() - state.lastCommentAt >= COMMENT_INTERVAL_MS;
 
