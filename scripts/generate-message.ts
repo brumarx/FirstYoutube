@@ -41,7 +41,15 @@ function loadEnvFile(path: string): void {
 
 loadEnvFile(new URL('../../ariaBot/.env.production', import.meta.url).pathname);
 
-const isFirst = process.argv.includes('--first');
+const isGreeting = process.argv.includes('--greeting');
+
+/** "Bom dia"/"Boa tarde"/"Boa noite" real, conforme a hora ATUAL em Sesimbra. */
+function saudacaoPorHora(): string {
+  const hora = horaAtualEmSesimbra();
+  if (hora >= 5 && hora < 12) return 'Bom dia';
+  if (hora >= 12 && hora < 19) return 'Boa tarde';
+  return 'Boa noite';
+}
 
 /**
  * Fatos VERDADEIROS e atemporais (não dependem de resultado de jogo) — usados só
@@ -200,8 +208,8 @@ async function main(): Promise<void> {
     humorTexto = 'Tom neutro e tranquilo, sem exagero de humor.';
   }
 
-  const task = isFirst
-    ? `Escreva UM comentário curto e empolgado pro chat ao vivo de uma live no YouTube, comemorando ter sido O PRIMEIRO a comentar (algo no estilo "EHHHHHHHH primeiro a entrar dessa vez!"). Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre ("primeiro", nunca "primeira"). Torcedor apaixonado do Botafogo, pode citar a estrela solitária ou "Fogão". ${personaDetalhe} 1 frase, bem informal, pode repetir letras por ênfase (tipo EHHHH). NÃO use emojis. NÃO use markdown.`
+  const task = isGreeting
+    ? `Escreva UMA saudação curta pro chat ao vivo de uma live do Botafogo no YouTube. Use exatamente esta saudação de acordo com a hora real agora ("${saudacaoPorHora()}"), sem trocar por outra. NÃO alegue ser o primeiro a comentar nem mencione ordem de chegada (isso irrita quem já está no chat). Inclua uma saudação alvinegra (tipo "saudações alvinegras") e mencione o Fogão; pode incluir uma expressão animada tipo "e aeeeeeee". Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} 1 frase curta, informal. NÃO use emojis. NÃO use markdown.`
     : `Escreva UM comentário curto pro chat ao vivo de uma live do canal do Botafogo, trazendo algo interessante sobre o clube. ${regraDados} ${humorTexto} Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} Tom de torcedor natural e gentil, como uma pessoa real comentaria — nada de gírias agressivas ou exagero forçado. 1-2 frases curtas. NÃO use emojis. NÃO use markdown.`;
 
   const result = await runProviderChain(providers, [

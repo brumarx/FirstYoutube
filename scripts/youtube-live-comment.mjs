@@ -1,4 +1,4 @@
-// Bot: assim que @SetorVisitante entra ao vivo no YouTube, comenta primeiro e
+// Bot: assim que @SetorVisitante entra ao vivo no YouTube, manda uma saudação e
 // depois posta comentários sobre o Botafogo de tempos em tempos, até a live acabar.
 // Rodar continuamente: `node scripts/youtube-live-comment.mjs` (ver deploy/ pra systemd).
 import { execFile } from 'node:child_process';
@@ -8,12 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { getAccessToken } from '../lib/youtube-auth.mjs';
-import {
-  checkChannelLive,
-  countLiveChatMessages,
-  getLiveStreamingDetails,
-  postLiveChatMessage,
-} from '../lib/youtube-api.mjs';
+import { checkChannelLive, getLiveStreamingDetails, postLiveChatMessage } from '../lib/youtube-api.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,48 +25,34 @@ const POLL_INTERVAL_MS = 30_000; // checa se entrou ao vivo (sem custo de cota)
 // o previsto num mesmo evento ao vivo, então errar pro lado de falar menos.
 const COMMENT_INTERVAL_MS = 20 * 60_000;
 const MAX_MESSAGES_PER_STREAM = 4;
-// Intervalo mínimo entre tentativas de postar a MESMA mensagem "primeiro" quando falha.
+// Intervalo mínimo entre tentativas de postar a MESMA saudação inicial quando falha.
 // Sem isso, tentar de novo a cada 30s martela o insert e o próprio YouTube passa a
 // rejeitar com rateLimitExceeded — o retry rápido demais VIRA o problema.
-const FIRST_RETRY_BACKOFF_MS = 90_000;
+const GREETING_RETRY_BACKOFF_MS = 90_000;
 
-// A diferença de horário Sesimbra x Brasil varia (~3-5h, depende do horário de
-// verão de cada lado), então só afirmamos "madrugada" quando é realmente tarde
-// AGORA em Sesimbra — nunca fixo (senão fica falso boa parte do ano/horário).
-function ehMadrugadaEmSesimbra() {
+// Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
+// no chat) — só um "boa tarde"/"bom dia"/"boa noite" real (hora atual em
+// Sesimbra, Portugal) com saudação alvinegra.
+function periodoDoDiaEmSesimbra() {
   const hora = Number(
     new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Lisbon', hour: '2-digit', hour12: false }).format(
       new Date(),
     ),
   );
-  return hora >= 23 || hora <= 6;
+  if (hora >= 5 && hora < 12) return 'Bom dia';
+  if (hora >= 12 && hora < 19) return 'Boa tarde';
+  return 'Boa noite';
 }
 
-const FIRST_FALLBACK_BASE = [
-  'EHHHHHHHHHHH primeiro a entrar dessa vez! Vamo Fogão!',
-  'CHEGUEI PRIMEIRO DE NOVO! Bora Botafogo!',
-  'Primeiro a entrar, alvinegro até debaixo d\'água!',
-  'Opa Dep, cheguei primeiro! Bora Fogão!',
-  'EHHHHHHHH primeiro direto de Sesimbra, Portugal!',
-];
-
-const FIRST_FALLBACK_MADRUGADA = [
-  'EHHHHHHHH primeiro de Sesimbra, já tá de madrugada aqui e eu não perco!',
-  'Opa Dep, cheguei primeiro! Bora Fogão, mesmo de madrugada em Portugal!',
-  'PRIMEIRO DE NOVO, direto de Sesimbra e já são tantas da manhã aqui, mas Botafogo é Botafogo!',
-];
-
-function firstFallbackPool() {
-  return ehMadrugadaEmSesimbra() ? [...FIRST_FALLBACK_BASE, ...FIRST_FALLBACK_MADRUGADA] : FIRST_FALLBACK_BASE;
+function greetingFallbackPool() {
+  const saudacao = periodoDoDiaEmSesimbra();
+  return [
+    `${saudacao}, saudações alvinegras! Fala, Fogão!`,
+    `E aeeeeeee, ${saudacao.toLowerCase()} pra todo mundo! Saudações alvinegras!`,
+    `${saudacao}! Fala Fogão, saudações alvinegras direto de Sesimbra!`,
+    `E aeeeeeee! ${saudacao}, torcida do Fogão!`,
+  ];
 }
-
-// Fallback genérico pro momento em que a live começa mas NÃO temos certeza de
-// sermos os primeiros (chat já tinha mensagens) — nunca alega "primeiro" aqui.
-const NORMAL_FALLBACK = [
-  'Chegueiii! Bora Botafogo, vamo com tudo!',
-  'Presente! Vamo Fogão, hoje é dia de fumaça!',
-  'Tá todo mundo aqui já? Vamo Botafogo, alvinegro até debaixo d\'água!',
-];
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -89,17 +70,17 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-async function generateMessage(isFirst) {
+async function generateMessage(isGreeting) {
   try {
-    const args = isFirst ? [GEN_SCRIPT, '--first'] : [GEN_SCRIPT];
+    const args = isGreeting ? [GEN_SCRIPT, '--greeting'] : [GEN_SCRIPT];
     const { stdout } = await execFileAsync(TSX_BIN, args, { timeout: 30_000 });
     const text = stdout.trim();
     if (text) return text;
   } catch (err) {
     log('⚠️ geração LLM falhou, usando fallback:', err.message);
   }
-  if (!isFirst) return null;
-  const pool = firstFallbackPool();
+  if (!isGreeting) return null;
+  const pool = greetingFallbackPool();
   return pool[Math.floor(Math.random() * pool.length)];
 }
 
@@ -107,7 +88,7 @@ async function tick(state) {
   if (!state.videoId) {
     // depois de uma tentativa falhada, espera o backoff — martelar a cada 30s é
     // o que faz o YouTube começar a rejeitar com rateLimitExceeded.
-    if (state.lastAttemptAt && Date.now() - state.lastAttemptAt < FIRST_RETRY_BACKOFF_MS) {
+    if (state.lastAttemptAt && Date.now() - state.lastAttemptAt < GREETING_RETRY_BACKOFF_MS) {
       return state;
     }
 
@@ -130,43 +111,17 @@ async function tick(state) {
 
     log(`🔴 ao vivo de verdade: ${liveVideoId}`);
 
-    // só afirma "primeiro" se o chat estiver mesmo vazio ainda (verificado via API,
-    // não assumido) — senão posta um comentário normal, sem alegar algo que não sabemos.
-    let souRealmentePrimeiro = false;
-    try {
-      souRealmentePrimeiro = (await countLiveChatMessages(details.activeLiveChatId, accessToken)) === 0;
-    } catch (err) {
-      log('⚠️ não deu pra confirmar se sou o primeiro, assumindo que não:', err.message);
-    }
-
-    let msg =
-      (await generateMessage(souRealmentePrimeiro)) ??
-      NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
-
-    // a geração pelo LLM leva alguns segundos — alguém pode ter comentado nesse
-    // meio-tempo, tornando falsa a alegação de "primeiro" checada lá em cima.
-    // Reconfirma bem em cima da hora de postar, o mais perto possível do insert real.
-    if (souRealmentePrimeiro) {
-      try {
-        const aindaVazio = (await countLiveChatMessages(details.activeLiveChatId, accessToken)) === 0;
-        if (!aindaVazio) {
-          souRealmentePrimeiro = false;
-          msg = NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
-        }
-      } catch {
-        // não deu pra reconfirmar → não arrisca alegar algo que pode não ser mais verdade
-        souRealmentePrimeiro = false;
-        msg = NORMAL_FALLBACK[Math.floor(Math.random() * NORMAL_FALLBACK.length)];
-      }
-    }
+    // saudação simples (bom dia/boa tarde/boa noite real + saudação alvinegra),
+    // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
+    const msg = await generateMessage(true);
 
     try {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
     } catch (err) {
-      log('⚠️ falha ao postar a primeira mensagem, aguarda backoff antes de tentar de novo:', err.message);
+      log('⚠️ falha ao postar a saudação inicial, aguarda backoff antes de tentar de novo:', err.message);
       return { ...state, lastAttemptAt: Date.now() };
     }
-    log(`✅ mensagem postada (primeiro=${souRealmentePrimeiro}): ${msg}`);
+    log(`✅ saudação postada: ${msg}`);
 
     return {
       videoId: liveVideoId,
