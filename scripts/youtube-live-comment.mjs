@@ -25,8 +25,15 @@ const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
 
 const HANDLE = '@SetorVisitante';
 const POLL_INTERVAL_MS = 30_000; // checa se entrou ao vivo (sem custo de cota)
-const COMMENT_INTERVAL_MS = 12 * 60_000; // intervalo entre comentários "interessantes" — espaçado, sem spammar o chat
-const MAX_MESSAGES_PER_STREAM = 6;
+// Espaçado bem mais que o normal: feedback repetido do usuário pra não falar
+// muito no chat — e resets manuais anteriores já fizeram o bot falar mais que
+// o previsto num mesmo evento ao vivo, então errar pro lado de falar menos.
+const COMMENT_INTERVAL_MS = 20 * 60_000;
+const MAX_MESSAGES_PER_STREAM = 4;
+// Intervalo mínimo entre tentativas de postar a MESMA mensagem "primeiro" quando falha.
+// Sem isso, tentar de novo a cada 30s martela o insert e o próprio YouTube passa a
+// rejeitar com rateLimitExceeded — o retry rápido demais VIRA o problema.
+const FIRST_RETRY_BACKOFF_MS = 90_000;
 
 // A diferença de horário Sesimbra x Brasil varia (~3-5h, depende do horário de
 // verão de cada lado), então só afirmamos "madrugada" quando é realmente tarde
@@ -72,9 +79,9 @@ function log(...args) {
 
 function loadState() {
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    return { lastAttemptAt: 0, ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) };
   } catch {
-    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0 };
+    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0, lastAttemptAt: 0 };
   }
 }
 
@@ -98,6 +105,12 @@ async function generateMessage(isFirst) {
 
 async function tick(state) {
   if (!state.videoId) {
+    // depois de uma tentativa falhada, espera o backoff — martelar a cada 30s é
+    // o que faz o YouTube começar a rejeitar com rateLimitExceeded.
+    if (state.lastAttemptAt && Date.now() - state.lastAttemptAt < FIRST_RETRY_BACKOFF_MS) {
+      return state;
+    }
+
     // ninguém ao vivo tratado ainda → checa se entrou agora
     const liveVideoId = await checkChannelLive(HANDLE);
     if (!liveVideoId) return state;
@@ -147,7 +160,12 @@ async function tick(state) {
       }
     }
 
-    await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
+    try {
+      await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
+    } catch (err) {
+      log('⚠️ falha ao postar a primeira mensagem, aguarda backoff antes de tentar de novo:', err.message);
+      return { ...state, lastAttemptAt: Date.now() };
+    }
     log(`✅ mensagem postada (primeiro=${souRealmentePrimeiro}): ${msg}`);
 
     return {
@@ -155,6 +173,7 @@ async function tick(state) {
       chatId: details.activeLiveChatId,
       messagesSent: 1,
       lastCommentAt: Date.now(),
+      lastAttemptAt: Date.now(),
     };
   }
 
@@ -163,7 +182,7 @@ async function tick(state) {
   const details = await getLiveStreamingDetails(state.videoId, accessToken);
   if (!details?.activeLiveChatId || details.actualEndTime) {
     log(`⏹️ live ${state.videoId} encerrada (${state.messagesSent} mensagens postadas)`);
-    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0 };
+    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0, lastAttemptAt: 0 };
   }
 
   const dueForComment =
@@ -174,7 +193,15 @@ async function tick(state) {
   if (dueForComment) {
     const msg = await generateMessage(false);
     if (msg) {
-      await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
+      try {
+        await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
+      } catch (err) {
+        // conta como "tentado" (lastCommentAt atualizado) mesmo falhando, senão o
+        // próximo ciclo (30s) tenta de novo na hora e martela o insert até o
+        // YouTube rejeitar com rateLimitExceeded — melhor esperar o intervalo cheio.
+        log('⚠️ falha ao postar comentário periódico, tenta só no próximo intervalo:', err.message);
+        return { ...state, lastCommentAt: Date.now() };
+      }
       log(`💬 comentário postado (${state.messagesSent + 1}/${MAX_MESSAGES_PER_STREAM}): ${msg}`);
       return { ...state, messagesSent: state.messagesSent + 1, lastCommentAt: Date.now() };
     }
