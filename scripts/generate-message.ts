@@ -3,7 +3,8 @@
 // Imprime SÓ o texto gerado em stdout (o processo pai captura via execFile).
 import { readFileSync } from 'node:fs';
 
-import { LEAGUES, fetchPlacar } from '../../ariaBot/src/commands/actions/football.ts';
+import { LEAGUES, type Jogo, espnScoreboard } from '../../ariaBot/src/commands/actions/football.ts';
+import { sharedCache } from '../../ariaBot/src/features/http-cache.ts';
 import { loadConfig } from '../../ariaBot/src/config/index.ts';
 import { runProviderChain } from '../../ariaBot/src/engine/provider.ts';
 import { buildProviders } from '../../ariaBot/src/engine/providers/index.ts';
@@ -107,38 +108,56 @@ interface JogoReal {
 }
 
 /**
+ * A ESPN retorna a RODADA inteira no scoreboard (jogos de vários dias, passados
+ * e futuros), não só os de hoje — foi isso que causou o bot comentar um jogo
+ * (ex.: contra o Fluminense) que não era daquele dia. Compara a data do evento
+ * com a data de hoje no fuso de Brasília (padrão do futebol brasileiro).
+ */
+function ehHoje(dataIsoUtc: string): boolean {
+  if (!dataIsoUtc) return false;
+  const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' });
+  const dataEvento = new Date(dataIsoUtc);
+  if (Number.isNaN(dataEvento.getTime())) return false;
+  return fmt.format(dataEvento) === fmt.format(new Date());
+}
+
+/**
  * Deriva o humor (feliz/triste/neutro) a partir dos NÚMEROS reais do placar —
  * nunca perguntando pro LLM "essa notícia é boa ou ruim", pra não arriscar
- * ele errar/inventar. Empate e jogos ainda sem placar ficam neutros.
+ * ele errar/inventar. Empate fica neutro.
  */
-function analisarLinha(linhaComEmoji: string): JogoReal {
-  const texto = linhaComEmoji.replace(/^[✅🔴📅]\s*/, '').trim();
-  const completo = linhaComEmoji.startsWith('✅') || linhaComEmoji.startsWith('🔴');
-  if (!completo) return { texto, humor: 'neutro' }; // 📅 agendado, sem resultado ainda
-
-  const m = texto.match(/^(.*?)\s+(\d+)\s+x\s+(\d+)\s+(.*?)(?:\s+_\(ao vivo\)_)?$/);
-  if (!m) return { texto, humor: 'neutro' };
-
-  const [, mandante, placarMandante, placarVisitante, visitante] = m;
-  const ehMandante = /botafogo|fogo/i.test(mandante);
-  const ehVisitante = /botafogo|fogo/i.test(visitante);
+function analisarJogo(jogo: Jogo): JogoReal {
+  const { home, away } = jogo;
+  const texto = `${home.nome} ${home.placar} x ${away.placar} ${away.nome}${jogo.aoVivo ? ' (ao vivo)' : ''}`;
+  const ehMandante = /botafogo|fogo/i.test(home.nome);
+  const ehVisitante = /botafogo|fogo/i.test(away.nome);
   if (!ehMandante && !ehVisitante) return { texto, humor: 'neutro' };
 
-  const golsBota = Number(ehMandante ? placarMandante : placarVisitante);
-  const golsAdversario = Number(ehMandante ? placarVisitante : placarMandante);
+  const golsBota = Number(ehMandante ? home.placar : away.placar);
+  const golsAdversario = Number(ehMandante ? away.placar : home.placar);
   if (golsBota > golsAdversario) return { texto, humor: 'feliz' };
   if (golsBota < golsAdversario) return { texto, humor: 'triste' };
   return { texto, humor: 'neutro' };
 }
 
-/** Tenta achar uma linha do Botafogo no placar real (ESPN) de uma lista de ligas. */
+/**
+ * Tenta achar um jogo do Botafogo REAL (ESPN) numa lista de ligas. Só considera
+ * jogo AO VIVO ou JÁ TERMINADO **e que seja de HOJE** — descarta jogos agendados
+ * e também jogos passados/futuros de outros dias que a ESPN incluiu na mesma
+ * rodada, pra nunca comentar um jogo como se fosse coisa do momento sem ser.
+ */
 async function buscarJogoReal(): Promise<JogoReal | null> {
   for (const liga of ['brasileirao', 'libertadores', 'copa_brasil', 'carioca']) {
     if (!LEAGUES[liga]) continue;
     try {
-      const placar = await fetchPlacar(fetch, liga);
-      const linha = placar.split('\n').find((l) => l.toLowerCase().includes('botafogo') || l.toLowerCase().includes('fogo'));
-      if (linha) return analisarLinha(linha);
+      const jogos = await espnScoreboard(fetch, sharedCache, liga);
+      const jogo = jogos?.find(
+        (j) =>
+          (j.completed || j.aoVivo) &&
+          ehHoje(j.date) &&
+          (/botafogo|fogo/i.test(j.home.nome) || /botafogo|fogo/i.test(j.away.nome)),
+      );
+      if (jogo) return analisarJogo(jogo);
     } catch {
       // liga indisponível → tenta a próxima
     }
