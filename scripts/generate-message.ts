@@ -115,11 +115,13 @@ function detalhesPersonaDisponiveis(): string[] {
   ];
 }
 
-type Humor = 'feliz' | 'triste' | 'neutro';
+type Humor = 'feliz' | 'triste' | 'neutro' | 'empate';
 
 interface JogoReal {
   texto: string;
   humor: Humor;
+  /** Adversário é um dos rivais cariocas (Flamengo/Vasco/Fluminense) — vitória nesses pede empolgação extra. */
+  classico: boolean;
 }
 
 /**
@@ -137,29 +139,41 @@ function ehHoje(dataIsoUtc: string): boolean {
 }
 
 /**
- * Deriva o humor (feliz/triste/neutro) a partir dos NÚMEROS reais do placar —
- * nunca perguntando pro LLM "essa notícia é boa ou ruim", pra não arriscar
- * ele errar/inventar. Empate fica neutro.
+ * Deriva o humor (feliz/triste/neutro/empate) a partir dos NÚMEROS reais do
+ * placar — nunca perguntando pro LLM "essa notícia é boa ou ruim", pra não
+ * arriscar ele errar/inventar. Empate só conta como 'empate' se o jogo já
+ * TERMINOU — gols iguais num jogo ainda ao vivo é só neutro/expectativa,
+ * porque o placar ainda pode mudar (senão o bot fala do jogo como se já
+ * tivesse acabado empatado quando na verdade ainda está rolando).
  */
 function analisarJogo(jogo: Jogo): JogoReal {
   const { home, away } = jogo;
   const texto = `${home.nome} ${home.placar} x ${away.placar} ${away.nome}${jogo.aoVivo ? ' (ao vivo)' : ''}`;
   const ehMandante = /botafogo|fogo/i.test(home.nome);
   const ehVisitante = /botafogo|fogo/i.test(away.nome);
-  if (!ehMandante && !ehVisitante) return { texto, humor: 'neutro' };
+  if (!ehMandante && !ehVisitante) return { texto, humor: 'neutro', classico: false };
+
+  // Rivais que pedem empolgação extra numa vitória: os cariocas (clássicos de
+  // verdade) e os paulistas que o torcedor mais implica (Corinthians, Palmeiras,
+  // São Paulo).
+  const adversarioNome = ehMandante ? away.nome : home.nome;
+  const classico = /flamengo|vasco|fluminense|corinthians|palmeiras|s(a|ã)o paulo/i.test(adversarioNome);
 
   const golsBota = Number(ehMandante ? home.placar : away.placar);
   const golsAdversario = Number(ehMandante ? away.placar : home.placar);
-  if (golsBota > golsAdversario) return { texto, humor: 'feliz' };
-  if (golsBota < golsAdversario) return { texto, humor: 'triste' };
-  return { texto, humor: 'neutro' };
+  if (golsBota > golsAdversario) return { texto, humor: 'feliz', classico };
+  if (golsBota < golsAdversario) return { texto, humor: 'triste', classico };
+  return { texto, humor: jogo.completed ? 'empate' : 'neutro', classico };
 }
 
 /**
- * Tenta achar um jogo do Botafogo REAL (ESPN) numa lista de ligas. Só considera
- * jogo AO VIVO ou JÁ TERMINADO **e que seja de HOJE** — descarta jogos agendados
- * e também jogos passados/futuros de outros dias que a ESPN incluiu na mesma
- * rodada, pra nunca comentar um jogo como se fosse coisa do momento sem ser.
+ * Tenta achar um jogo do Botafogo REAL (ESPN) numa lista de ligas. Um jogo AO
+ * VIVO já é "de agora" por definição (não precisa bater com a data de hoje —
+ * um jogo que começou antes da meia-noite e segue rolando não pode ser
+ * descartado só por isso). Um jogo JÁ TERMINADO só conta se for de HOJE,
+ * porque a ESPN inclui na mesma rodada jogos passados/futuros de outros dias,
+ * e sem essa checagem o bot comentava um jogo antigo como se fosse coisa do
+ * momento (ex.: contra o Fluminense, que não era daquele dia).
  */
 async function buscarJogoReal(): Promise<JogoReal | null> {
   for (const liga of ['brasileirao', 'libertadores', 'copa_brasil', 'carioca']) {
@@ -168,8 +182,7 @@ async function buscarJogoReal(): Promise<JogoReal | null> {
       const jogos = await espnScoreboard(fetch, sharedCache, liga);
       const jogo = jogos?.find(
         (j) =>
-          (j.completed || j.aoVivo) &&
-          ehHoje(j.date) &&
+          (j.aoVivo || (j.completed && ehHoje(j.date))) &&
           (/botafogo|fogo/i.test(j.home.nome) || /botafogo|fogo/i.test(j.away.nome)),
       );
       if (jogo) return analisarJogo(jogo);
@@ -227,10 +240,14 @@ async function main(): Promise<void> {
   if (jogoReal) {
     regraDados = `Dado REAL de jogo (ESPN, use exatamente isto se for comentar placar): ${jogoReal.texto}`;
     const regraHumor: Record<Humor, string> = {
-      feliz: 'O Botafogo GANHOU esse jogo — fique de bom humor, feliz, comemorando o resultado.',
+      feliz: jogoReal.classico
+        ? 'O Botafogo GANHOU esse jogo de um rival direto (clássico) — fique MUITO feliz, empolgação bem maior que um jogo qualquer, pode comemorar mais forte (sem provocar nem desrespeitar o rival).'
+        : 'O Botafogo GANHOU esse jogo — fique de bom humor, feliz, comemorando o resultado.',
       triste:
         'O Botafogo PERDEU esse jogo — fique de mau humor, chateado/cabisbaixo com o resultado, mas continue respeitoso (sem ofender ninguém, sem hostilidade).',
       neutro: 'Ainda não há resultado final decidido — tom neutro, na expectativa, sem comemorar nem lamentar.',
+      empate:
+        'O jogo JÁ TERMINOU EMPATADO — trate como resultado final (não fique "na expectativa"), tom neutro/tranquilo, sem decepção nem comemoração.',
     };
     humorTexto = regraHumor[jogoReal.humor];
   } else if (noticiaCanal) {
