@@ -1,5 +1,6 @@
 // Bot: assim que @SetorVisitante entra ao vivo no YouTube, manda uma saudação e
-// depois posta comentários sobre o Botafogo de tempos em tempos, até a live acabar.
+// depois posta comentários sobre o Botafogo de tempos em tempos — mas só fica
+// ~15min na live, não até ela acabar.
 // Rodar continuamente: `node scripts/youtube-live-comment.mjs` (ver deploy/ pra systemd).
 import { execFile } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -20,15 +21,18 @@ const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
 
 const HANDLE = '@SetorVisitante';
 const POLL_INTERVAL_MS = 30_000; // checa se entrou ao vivo (sem custo de cota)
-// Espaçado bem mais que o normal: feedback repetido do usuário pra não falar
-// muito no chat — e resets manuais anteriores já fizeram o bot falar mais que
-// o previsto num mesmo evento ao vivo, então errar pro lado de falar menos.
-const COMMENT_INTERVAL_MS = 20 * 60_000;
+const COMMENT_INTERVAL_MS = 5 * 60_000;
 const MAX_MESSAGES_PER_STREAM = 4;
+// Bot não fica até o fim da live — entra, comenta um pouco e sai depois desse tempo,
+// mesmo que a live continue ao vivo.
+const STAY_DURATION_MS = 15 * 60_000;
 // Intervalo mínimo entre tentativas de postar a MESMA saudação inicial quando falha.
 // Sem isso, tentar de novo a cada 30s martela o insert e o próprio YouTube passa a
 // rejeitar com rateLimitExceeded — o retry rápido demais VIRA o problema.
 const GREETING_RETRY_BACKOFF_MS = 90_000;
+// Quantas mensagens recentes guardar (entre lives diferentes) só pra não repetir
+// a mesma frase de novo — não precisa ser um histórico longo.
+const MAX_HISTORY = 30;
 
 // Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
 // no chat) — só um "boa tarde"/"bom dia"/"boa noite" real (hora atual em
@@ -60,9 +64,24 @@ function log(...args) {
 
 function loadState() {
   try {
-    return { lastAttemptAt: 0, ...JSON.parse(readFileSync(STATE_FILE, 'utf8')) };
+    return {
+      lastAttemptAt: 0,
+      enteredAt: 0,
+      attendedVideoId: null,
+      history: [],
+      ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
+    };
   } catch {
-    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0, lastAttemptAt: 0 };
+    return {
+      videoId: null,
+      chatId: null,
+      messagesSent: 0,
+      lastCommentAt: 0,
+      lastAttemptAt: 0,
+      enteredAt: 0,
+      attendedVideoId: null,
+      history: [],
+    };
   }
 }
 
@@ -70,18 +89,36 @@ function saveState(state) {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-async function generateMessage(isGreeting) {
+// Guarda as últimas mensagens postadas (entre lives diferentes) pra nunca repetir
+// a mesma frase de novo — sem isso o histórico de cada live começava do zero e o
+// bot podia mandar exatamente a mesma saudação/comentário em transmissões diferentes.
+function pushHistory(history, msg) {
+  const atual = history ?? [];
+  if (!msg) return atual;
+  const semDuplicata = atual.filter((m) => m !== msg);
+  return [...semDuplicata, msg].slice(-MAX_HISTORY);
+}
+
+async function generateMessage(isGreeting, history = []) {
   try {
-    const args = isGreeting ? [GEN_SCRIPT, '--greeting'] : [GEN_SCRIPT];
+    const args = [GEN_SCRIPT];
+    if (isGreeting) args.push('--greeting');
+    if (history.length > 0) {
+      args.push(`--history-b64=${Buffer.from(JSON.stringify(history), 'utf8').toString('base64')}`);
+    }
     const { stdout } = await execFileAsync(TSX_BIN, args, { timeout: 30_000 });
     const text = stdout.trim();
-    if (text) return text;
+    // segurança extra: mesmo pedindo pro LLM não repetir, confere de verdade —
+    // se saiu igualzinho a algo já usado, trata como falha e cai no fallback.
+    if (text && !history.includes(text)) return text;
+    if (text) log('⚠️ LLM repetiu uma mensagem já usada antes, descartando:', text);
   } catch (err) {
     log('⚠️ geração LLM falhou, usando fallback:', err.message);
   }
   if (!isGreeting) return null;
-  const pool = greetingFallbackPool();
-  return pool[Math.floor(Math.random() * pool.length)];
+  const pool = greetingFallbackPool().filter((m) => !history.includes(m));
+  const opcoes = pool.length > 0 ? pool : greetingFallbackPool();
+  return opcoes[Math.floor(Math.random() * opcoes.length)];
 }
 
 async function tick(state) {
@@ -95,6 +132,8 @@ async function tick(state) {
     // ninguém ao vivo tratado ainda → checa se entrou agora
     const liveVideoId = await checkChannelLive(HANDLE);
     if (!liveVideoId) return state;
+    // já passamos por essa live e saímos após os 15min — não entra de novo nela
+    if (liveVideoId === state.attendedVideoId) return state;
 
     const accessToken = await getAccessToken();
     const details = await getLiveStreamingDetails(liveVideoId, accessToken);
@@ -113,7 +152,7 @@ async function tick(state) {
 
     // saudação simples (bom dia/boa tarde/boa noite real + saudação alvinegra),
     // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
-    const msg = await generateMessage(true);
+    const msg = await generateMessage(true, state.history);
 
     try {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
@@ -129,6 +168,9 @@ async function tick(state) {
       messagesSent: 1,
       lastCommentAt: Date.now(),
       lastAttemptAt: Date.now(),
+      enteredAt: Date.now(),
+      attendedVideoId: state.attendedVideoId,
+      history: pushHistory(state.history, msg),
     };
   }
 
@@ -137,7 +179,31 @@ async function tick(state) {
   const details = await getLiveStreamingDetails(state.videoId, accessToken);
   if (!details?.activeLiveChatId || details.actualEndTime) {
     log(`⏹️ live ${state.videoId} encerrada (${state.messagesSent} mensagens postadas)`);
-    return { videoId: null, chatId: null, messagesSent: 0, lastCommentAt: 0, lastAttemptAt: 0 };
+    return {
+      videoId: null,
+      chatId: null,
+      messagesSent: 0,
+      lastCommentAt: 0,
+      lastAttemptAt: 0,
+      enteredAt: 0,
+      attendedVideoId: null,
+      history: state.history,
+    };
+  }
+
+  // não fica até o fim: sai depois de ~15min na live, mesmo que ela continue ao vivo
+  if (Date.now() - state.enteredAt >= STAY_DURATION_MS) {
+    log(`👋 saindo da live ${state.videoId} após ~${STAY_DURATION_MS / 60_000}min (${state.messagesSent} mensagens postadas), live continua ao vivo`);
+    return {
+      videoId: null,
+      chatId: null,
+      messagesSent: 0,
+      lastCommentAt: 0,
+      lastAttemptAt: 0,
+      enteredAt: 0,
+      attendedVideoId: state.videoId,
+      history: state.history,
+    };
   }
 
   const dueForComment =
@@ -146,7 +212,7 @@ async function tick(state) {
     Date.now() - state.lastCommentAt >= COMMENT_INTERVAL_MS;
 
   if (dueForComment) {
-    const msg = await generateMessage(false);
+    const msg = await generateMessage(false, state.history);
     if (msg) {
       try {
         await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
@@ -158,7 +224,12 @@ async function tick(state) {
         return { ...state, lastCommentAt: Date.now() };
       }
       log(`💬 comentário postado (${state.messagesSent + 1}/${MAX_MESSAGES_PER_STREAM}): ${msg}`);
-      return { ...state, messagesSent: state.messagesSent + 1, lastCommentAt: Date.now() };
+      return {
+        ...state,
+        messagesSent: state.messagesSent + 1,
+        lastCommentAt: Date.now(),
+        history: pushHistory(state.history, msg),
+      };
     }
   }
 

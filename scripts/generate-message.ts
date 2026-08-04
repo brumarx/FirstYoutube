@@ -44,6 +44,21 @@ loadEnvFile(new URL('../../ariaBot/.env.production', import.meta.url).pathname);
 
 const isGreeting = process.argv.includes('--greeting');
 
+/** Mensagens já postadas em lives anteriores (passadas pelo processo pai em base64), pra não repetir. */
+function lerHistorico(): string[] {
+  const arg = process.argv.find((a) => a.startsWith('--history-b64='));
+  if (!arg) return [];
+  try {
+    const json = Buffer.from(arg.slice('--history-b64='.length), 'base64').toString('utf8');
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? parsed.filter((m): m is string => typeof m === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+const historico = lerHistorico();
+
 /** "Bom dia"/"Boa tarde"/"Boa noite" real, conforme a hora ATUAL em Sesimbra. */
 function saudacaoPorHora(): string {
   const hora = horaAtualEmSesimbra();
@@ -227,9 +242,16 @@ async function main(): Promise<void> {
     humorTexto = 'Tom neutro e tranquilo, sem exagero de humor.';
   }
 
+  // Sem isso, o mesmo comentário (ex.: a saudação padrão, ou o mesmo fato atemporal)
+  // podia sair idêntico em lives diferentes — parece bot repetindo script.
+  const regraHistorico =
+    historico.length > 0
+      ? ` NÃO repita nenhuma destas mensagens já usadas antes (nem de forma quase idêntica — varie a frase, mesmo que o assunto seja parecido): ${historico.map((m) => `"${m}"`).join(' / ')}.`
+      : '';
+
   const task = isGreeting
-    ? `Escreva UMA saudação curta pro chat ao vivo de uma live do Botafogo no YouTube. Use exatamente esta saudação de acordo com a hora real agora ("${saudacaoPorHora()}"), sem trocar por outra. NÃO alegue ser o primeiro a comentar nem mencione ordem de chegada (isso irrita quem já está no chat). Inclua uma saudação alvinegra (tipo "saudações alvinegras") e mencione o Fogão; pode incluir uma expressão animada tipo "e aeeeeeee". Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} 1 frase curta, informal. NÃO use emojis. NÃO use markdown.`
-    : `Escreva UM comentário curto pro chat ao vivo de uma live do canal do Botafogo, trazendo algo interessante sobre o clube. ${regraDados} ${humorTexto} Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} Tom de torcedor natural e gentil, como uma pessoa real comentaria — nada de gírias agressivas ou exagero forçado. 1-2 frases curtas. NÃO use emojis. NÃO use markdown.`;
+    ? `Escreva UMA saudação curta pro chat ao vivo de uma live do Botafogo no YouTube. Use exatamente esta saudação de acordo com a hora real agora ("${saudacaoPorHora()}"), sem trocar por outra. NÃO alegue ser o primeiro a comentar nem mencione ordem de chegada (isso irrita quem já está no chat). Inclua uma saudação alvinegra (tipo "saudações alvinegras") e mencione o Fogão; pode incluir uma expressão animada tipo "e aeeeeeee". Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} 1 frase curta, informal. NÃO use emojis. NÃO use markdown.${regraHistorico}`
+    : `Escreva UM comentário curto pro chat ao vivo de uma live do canal do Botafogo, trazendo algo interessante sobre o clube. ${regraDados} ${humorTexto} Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} Tom de torcedor natural e gentil, como uma pessoa real comentaria — nada de gírias agressivas ou exagero forçado. 1-2 frases curtas. NÃO use emojis. NÃO use markdown.${regraHistorico}`;
 
   const result = await runProviderChain(providers, [
     {
