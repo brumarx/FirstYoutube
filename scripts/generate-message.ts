@@ -82,14 +82,6 @@ const FATOS_ATEMPORAIS = [
   'as cores do Botafogo são preto e branco, e o clube é conhecido também como "Glorioso"',
 ];
 
-/**
- * Detalhes de persona (torcedor real, não genérico) — usados só ÀS VEZES pra não
- * ficar repetitivo: cita o Dep (apresentador da live) e/ou o fato de estar
- * assistindo de Sesimbra, Portugal. A diferença de horário pro Brasil varia (~3-5h,
- * depende do horário de verão de cada lado), então calculamos a hora ATUAL em
- * Sesimbra e só afirmamos "madrugada"/"tarde da noite" se for realmente verdade
- * naquele momento — nunca assumido fixo.
- */
 function horaAtualEmSesimbra(): number {
   const hora = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Lisbon',
@@ -99,17 +91,17 @@ function horaAtualEmSesimbra(): number {
   return Number(hora);
 }
 
+/**
+ * Detalhes de persona (torcedor real, não genérico) — usados só ÀS VEZES pra não
+ * ficar repetitivo: cita o Dep (apresentador da live). Sesimbra foi removida das
+ * opções — o bot estava mencionando de mais e ficou repetitivo/cansativo no chat.
+ */
 function detalhesPersonaDisponiveis(): string[] {
-  const hora = horaAtualEmSesimbra();
-  const ehMadrugada = hora >= 23 || hora <= 6;
-  const lisboaDetalhe = ehMadrugada
-    ? 'Pode comentar que está assistindo direto de Sesimbra, Portugal, e que aí já são altas horas da madrugada.'
-    : 'Pode comentar que está assistindo direto de Sesimbra, Portugal (sem afirmar que é madrugada nem tarde — só mencionar que está em Sesimbra).';
   return [
     'Pode mencionar o Dep (quem apresenta a live) torcendo junto com ele.',
-    lisboaDetalhe,
     'Pode mandar um alô pro Dep.',
     '', // na maioria das vezes não força nenhum detalhe de persona
+    '',
     '',
     '',
   ];

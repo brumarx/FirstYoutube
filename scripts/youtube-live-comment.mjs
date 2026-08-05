@@ -20,7 +20,11 @@ const TSX_BIN = path.join(ROOT, '..', 'ariaBot', 'node_modules', '.bin', 'tsx');
 const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
 
 const HANDLE = '@SetorVisitante';
-const POLL_INTERVAL_MS = 30_000; // checa se entrou ao vivo (sem custo de cota)
+const POLL_INTERVAL_MS = 30_000; // varre o canal atrás de uma NOVA live (scraping, sem custo de cota)
+// Depois que já sabemos qual vídeo vai ficar ao vivo (pré-show), poll rápido só
+// nesse vídeo via API — é o que decide se o bot chega no "pódio" (entre os 5
+// primeiros comentários) ou perde pra quem já está com o dedo no gatilho no chat.
+const PRESHOW_POLL_INTERVAL_MS = 5_000;
 const COMMENT_INTERVAL_MS = 5 * 60_000;
 const MAX_MESSAGES_PER_STREAM = 4;
 // Bot não fica até o fim da live — entra, comenta um pouco e sai depois desse tempo,
@@ -53,7 +57,7 @@ function greetingFallbackPool() {
   return [
     `${saudacao}, saudações alvinegras! Fala, Fogão!`,
     `E aeeeeeee, ${saudacao.toLowerCase()} pra todo mundo! Saudações alvinegras!`,
-    `${saudacao}! Fala Fogão, saudações alvinegras direto de Sesimbra!`,
+    `${saudacao}! Fala Fogão, e aeeeeeee!`,
     `E aeeeeeee! ${saudacao}, torcida do Fogão!`,
   ];
 }
@@ -68,6 +72,8 @@ function loadState() {
       lastAttemptAt: 0,
       enteredAt: 0,
       attendedVideoId: null,
+      preShowVideoId: null,
+      pendingGreeting: null,
       history: [],
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
@@ -80,6 +86,8 @@ function loadState() {
       lastAttemptAt: 0,
       enteredAt: 0,
       attendedVideoId: null,
+      preShowVideoId: null,
+      pendingGreeting: null,
       history: [],
     };
   }
@@ -129,36 +137,49 @@ async function tick(state) {
       return state;
     }
 
-    // ninguém ao vivo tratado ainda → checa se entrou agora
-    const liveVideoId = await checkChannelLive(HANDLE);
-    if (!liveVideoId) return state;
-    // já passamos por essa live e saímos após os 15min — não entra de novo nela
-    if (liveVideoId === state.attendedVideoId) return state;
+    // já sabemos qual vídeo vai ficar ao vivo (achado num ciclo anterior, ainda em
+    // pré-show) → pula o scraping do canal e vai direto pra API nesse vídeo, com
+    // poll rápido (ver PRESHOW_POLL_INTERVAL_MS), pra pegar o instante exato em
+    // que vira "ao vivo de verdade" em vez de só notar até 30s depois.
+    let liveVideoId = state.preShowVideoId;
+    if (!liveVideoId) {
+      liveVideoId = await checkChannelLive(HANDLE);
+      if (!liveVideoId) return state;
+      // já passamos por essa live e saímos após os 15min — não entra de novo nela
+      if (liveVideoId === state.attendedVideoId) return state;
+    }
 
     const accessToken = await getAccessToken();
     const details = await getLiveStreamingDetails(liveVideoId, accessToken);
-    if (!details?.activeLiveChatId) {
+    if (!details) {
+      // vídeo sumiu (ex: live cancelada) — esquece esse candidato e volta a varrer o canal
+      return { ...state, preShowVideoId: null, pendingGreeting: null };
+    }
+    if (!details.activeLiveChatId) {
       log('sem activeLiveChatId ainda, tenta de novo no próximo ciclo');
-      return state;
+      return { ...state, preShowVideoId: liveVideoId };
     }
     // chat costuma abrir bem antes da transmissão real (vídeo ainda "upcoming"),
     // postar nessa sala de espera falha às vezes e gastaria comentário à toa.
     if (!details.isReallyLive) {
       log(`⏳ ${liveVideoId} ainda em pré-show (sala de espera), aguardando começar de verdade`);
-      return state;
+      // aproveita a espera pra deixar a saudação pronta — assim, quando virar "ao
+      // vivo de verdade", não perde tempo esperando o LLM no meio do caminho.
+      const pendingGreeting = state.pendingGreeting ?? (await generateMessage(true, state.history));
+      return { ...state, preShowVideoId: liveVideoId, pendingGreeting };
     }
 
     log(`🔴 ao vivo de verdade: ${liveVideoId}`);
 
     // saudação simples (bom dia/boa tarde/boa noite real + saudação alvinegra),
     // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
-    const msg = await generateMessage(true, state.history);
+    const msg = state.pendingGreeting ?? (await generateMessage(true, state.history));
 
     try {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
     } catch (err) {
       log('⚠️ falha ao postar a saudação inicial, aguarda backoff antes de tentar de novo:', err.message);
-      return { ...state, lastAttemptAt: Date.now() };
+      return { ...state, preShowVideoId: liveVideoId, pendingGreeting: msg, lastAttemptAt: Date.now() };
     }
     log(`✅ saudação postada: ${msg}`);
 
@@ -170,6 +191,8 @@ async function tick(state) {
       lastAttemptAt: Date.now(),
       enteredAt: Date.now(),
       attendedVideoId: state.attendedVideoId,
+      preShowVideoId: null,
+      pendingGreeting: null,
       history: pushHistory(state.history, msg),
     };
   }
@@ -187,6 +210,8 @@ async function tick(state) {
       lastAttemptAt: 0,
       enteredAt: 0,
       attendedVideoId: null,
+      preShowVideoId: null,
+      pendingGreeting: null,
       history: state.history,
     };
   }
@@ -202,6 +227,8 @@ async function tick(state) {
       lastAttemptAt: 0,
       enteredAt: 0,
       attendedVideoId: state.videoId,
+      preShowVideoId: null,
+      pendingGreeting: null,
       history: state.history,
     };
   }
@@ -246,7 +273,10 @@ async function main() {
     } catch (err) {
       log('❌ erro no ciclo:', err.message);
     }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    // já tem um candidato conhecido esperando virar "ao vivo de verdade" →
+    // poll rápido; senão, só varrendo o canal por uma nova live, sem pressa.
+    const waitingOnCandidate = !state.videoId && Boolean(state.preShowVideoId);
+    await new Promise((r) => setTimeout(r, waitingOnCandidate ? PRESHOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS));
   }
 }
 
