@@ -20,7 +20,7 @@ const TSX_BIN = path.join(ROOT, '..', 'ariaBot', 'node_modules', '.bin', 'tsx');
 const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
 
 const HANDLE = '@SetorVisitante';
-const POLL_INTERVAL_MS = 30_000; // varre o canal atrás de uma NOVA live (scraping, sem custo de cota)
+const POLL_INTERVAL_MS = 10_000; // varre o canal atrás de uma NOVA live (scraping, sem custo de cota)
 // Depois que já sabemos qual vídeo vai ficar ao vivo (pré-show), poll rápido só
 // nesse vídeo via API — é o que decide se o bot chega no "pódio" (entre os 5
 // primeiros comentários) ou perde pra quem já está com o dedo no gatilho no chat.
@@ -159,17 +159,19 @@ async function tick(state) {
       log('sem activeLiveChatId ainda, tenta de novo no próximo ciclo');
       return { ...state, preShowVideoId: liveVideoId };
     }
-    // chat costuma abrir bem antes da transmissão real (vídeo ainda "upcoming"),
-    // postar nessa sala de espera falha às vezes e gastaria comentário à toa.
-    if (!details.isReallyLive) {
-      log(`⏳ ${liveVideoId} ainda em pré-show (sala de espera), aguardando começar de verdade`);
-      // aproveita a espera pra deixar a saudação pronta — assim, quando virar "ao
-      // vivo de verdade", não perde tempo esperando o LLM no meio do caminho.
-      const pendingGreeting = state.pendingGreeting ?? (await generateMessage(true, state.history));
-      return { ...state, preShowVideoId: liveVideoId, pendingGreeting };
-    }
 
-    log(`🔴 ao vivo de verdade: ${liveVideoId}`);
+    // chat costuma abrir bem antes da transmissão real (vídeo ainda "upcoming"),
+    // e é justamente nessa sala de espera que o resto da torcida já está comentando
+    // — esperar o `isReallyLive` pra só então postar custava o "pódio" inteiro pra
+    // quem não tinha esse escrúpulo. O erro INVALID_REQUEST_METADATA que motivou
+    // essa espera acontece de vez em quando de qualquer jeito, inclusive já ao vivo
+    // de verdade (ver histórico do bot) — não é exclusivo da sala de espera, então
+    // não vale a pena abrir mão do pódio pra evitar algo que o backoff já cobre.
+    if (!details.isReallyLive) {
+      log(`⏳ ${liveVideoId} ainda em pré-show (sala de espera) — chat já aberto, tenta postar a saudação mesmo assim`);
+    } else {
+      log(`🔴 ao vivo de verdade: ${liveVideoId}`);
+    }
 
     // saudação simples (bom dia/boa tarde/boa noite real + saudação alvinegra),
     // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
@@ -189,7 +191,10 @@ async function tick(state) {
       messagesSent: 1,
       lastCommentAt: Date.now(),
       lastAttemptAt: Date.now(),
-      enteredAt: Date.now(),
+      // só começa a contar os ~15min de permanência quando o jogo estiver realmente
+      // ao vivo — se a saudação saiu ainda na sala de espera, esperar aqui evita
+      // gastar esse tempo (e sair cedo demais) antes do jogo começar de verdade.
+      enteredAt: details.isReallyLive ? Date.now() : 0,
       attendedVideoId: state.attendedVideoId,
       preShowVideoId: null,
       pendingGreeting: null,
@@ -214,6 +219,13 @@ async function tick(state) {
       pendingGreeting: null,
       history: state.history,
     };
+  }
+
+  // saudação foi postada ainda na sala de espera (enteredAt zerado) — só começa a
+  // contar os ~15min de permanência quando o jogo estiver realmente ao vivo.
+  if (!state.enteredAt) {
+    if (!details.isReallyLive) return state;
+    state = { ...state, enteredAt: Date.now() };
   }
 
   // não fica até o fim: sai depois de ~15min na live, mesmo que ela continue ao vivo
