@@ -9,7 +9,13 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { getAccessToken } from '../lib/youtube-auth.mjs';
-import { checkChannelLive, getLiveStreamingDetails, postLiveChatMessage } from '../lib/youtube-api.mjs';
+import {
+  checkChannelLive,
+  fetchLiveChatMessages,
+  getLiveStreamingDetails,
+  getOwnChannelId,
+  postLiveChatMessage,
+} from '../lib/youtube-api.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -37,6 +43,9 @@ const GREETING_RETRY_BACKOFF_MS = 90_000;
 // Quantas mensagens recentes guardar (entre lives diferentes) só pra não repetir
 // a mesma frase de novo — não precisa ser um histórico longo.
 const MAX_HISTORY = 30;
+// Quantas mensagens recentes de OUTRAS pessoas no chat manter como contexto pro
+// LLM poder reagir de forma natural — só da live atual, reseta a cada transmissão.
+const MAX_CHAT_CONTEXT = 10;
 
 // Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
 // no chat) — só um "boa tarde"/"bom dia"/"boa noite" real (hora atual em
@@ -75,6 +84,8 @@ function loadState() {
       preShowVideoId: null,
       pendingGreeting: null,
       history: [],
+      chatPageToken: null,
+      recentChat: [],
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -89,6 +100,8 @@ function loadState() {
       preShowVideoId: null,
       pendingGreeting: null,
       history: [],
+      chatPageToken: null,
+      recentChat: [],
     };
   }
 }
@@ -107,12 +120,18 @@ function pushHistory(history, msg) {
   return [...semDuplicata, msg].slice(-MAX_HISTORY);
 }
 
-async function generateMessage(isGreeting, history = []) {
+async function generateMessage(isGreeting, history = [], extra = {}) {
   try {
     const args = [GEN_SCRIPT];
     if (isGreeting) args.push('--greeting');
     if (history.length > 0) {
       args.push(`--history-b64=${Buffer.from(JSON.stringify(history), 'utf8').toString('base64')}`);
+    }
+    if (extra.title) {
+      args.push(`--live-title-b64=${Buffer.from(extra.title, 'utf8').toString('base64')}`);
+    }
+    if (extra.chatContext?.length > 0) {
+      args.push(`--chat-context-b64=${Buffer.from(JSON.stringify(extra.chatContext), 'utf8').toString('base64')}`);
     }
     const { stdout } = await execFileAsync(TSX_BIN, args, { timeout: 30_000 });
     const text = stdout.trim();
@@ -129,7 +148,7 @@ async function generateMessage(isGreeting, history = []) {
   return opcoes[Math.floor(Math.random() * opcoes.length)];
 }
 
-async function tick(state) {
+async function tick(state, ownChannelId) {
   if (!state.videoId) {
     // depois de uma tentativa falhada, espera o backoff — martelar a cada 30s é
     // o que faz o YouTube começar a rejeitar com rateLimitExceeded.
@@ -175,7 +194,9 @@ async function tick(state) {
 
     // saudação simples (bom dia/boa tarde/boa noite real + saudação alvinegra),
     // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
-    const msg = state.pendingGreeting ?? (await generateMessage(true, state.history));
+    // Passa o título real da live pra saudação poder soar como quem realmente
+    // entrou nessa transmissão específica, em vez de um texto genérico.
+    const msg = state.pendingGreeting ?? (await generateMessage(true, state.history, { title: details.title }));
 
     try {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
@@ -218,7 +239,28 @@ async function tick(state) {
       preShowVideoId: null,
       pendingGreeting: null,
       history: state.history,
+      chatPageToken: null,
+      recentChat: [],
     };
+  }
+
+  // lê mensagens novas do chat (delta via pageToken, então cada chamada só traz o
+  // que chegou desde a última) pra dar contexto de reação — não derruba o ciclo se
+  // falhar, só segue sem contexto novo dessa vez.
+  try {
+    const { items, nextPageToken } = await fetchLiveChatMessages(
+      details.activeLiveChatId,
+      accessToken,
+      state.chatPageToken,
+    );
+    const deOutros = ownChannelId ? items.filter((m) => m.channelId !== ownChannelId) : items;
+    state = {
+      ...state,
+      recentChat: deOutros.length > 0 ? [...state.recentChat, ...deOutros].slice(-MAX_CHAT_CONTEXT) : state.recentChat,
+      chatPageToken: nextPageToken,
+    };
+  } catch (err) {
+    log('⚠️ falha ao ler mensagens do chat, segue sem contexto novo:', err.message);
   }
 
   // saudação foi postada ainda na sala de espera (enteredAt zerado) — só começa a
@@ -242,6 +284,8 @@ async function tick(state) {
       preShowVideoId: null,
       pendingGreeting: null,
       history: state.history,
+      chatPageToken: null,
+      recentChat: [],
     };
   }
 
@@ -251,7 +295,10 @@ async function tick(state) {
     Date.now() - state.lastCommentAt >= COMMENT_INTERVAL_MS;
 
   if (dueForComment) {
-    const msg = await generateMessage(false, state.history);
+    const msg = await generateMessage(false, state.history, {
+      title: details.title,
+      chatContext: state.recentChat,
+    });
     if (msg) {
       try {
         await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
@@ -278,9 +325,15 @@ async function tick(state) {
 async function main() {
   log(`iniciando bot de live chat para ${HANDLE}`);
   let state = loadState();
+  // buscado uma vez só (não muda durante a execução) — usado pra filtrar as
+  // próprias mensagens fora do contexto de chat passado pro LLM.
+  const ownChannelId = await getOwnChannelId(await getAccessToken()).catch((err) => {
+    log('⚠️ não consegui obter o próprio channelId, contexto de chat não vai filtrar as próprias mensagens:', err.message);
+    return null;
+  });
   for (;;) {
     try {
-      state = await tick(state);
+      state = await tick(state, ownChannelId);
       saveState(state);
     } catch (err) {
       log('❌ erro no ciclo:', err.message);

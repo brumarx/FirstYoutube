@@ -59,6 +59,39 @@ function lerHistorico(): string[] {
 
 const historico = lerHistorico();
 
+/** Título atual da live (passado pelo processo pai) — o que essa transmissão é, agora. */
+function lerTituloLive(): string | null {
+  const arg = process.argv.find((a) => a.startsWith('--live-title-b64='));
+  if (!arg) return null;
+  try {
+    const titulo = Buffer.from(arg.slice('--live-title-b64='.length), 'base64').toString('utf8').trim();
+    return titulo || null;
+  } catch {
+    return null;
+  }
+}
+
+const tituloLive = lerTituloLive();
+
+/** Mensagens recentes de OUTRAS pessoas no chat (passadas pelo processo pai), pra reagir de forma natural. */
+function lerChatContext(): Array<{ author: string; text: string }> {
+  const arg = process.argv.find((a) => a.startsWith('--chat-context-b64='));
+  if (!arg) return [];
+  try {
+    const json = Buffer.from(arg.slice('--chat-context-b64='.length), 'base64').toString('utf8');
+    const parsed = JSON.parse(json);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (m): m is { author: string; text: string } =>
+        m && typeof m.text === 'string' && typeof m.author === 'string',
+    );
+  } catch {
+    return [];
+  }
+}
+
+const chatContext = lerChatContext();
+
 /** "Bom dia"/"Boa tarde"/"Boa noite" real, conforme a hora ATUAL em Sesimbra. */
 function saudacaoPorHora(): string {
   const hora = horaAtualEmSesimbra();
@@ -74,10 +107,10 @@ function saudacaoPorHora(): string {
  * e o modelo inventou um placar falso).
  */
 const FATOS_ATEMPORAIS = [
-  'o apelido "Fogão" vem de um antigo posto de gasolina perto da sede do clube',
+  'O apelido "Fogão" é simplesmente um aumentativo carinhoso e popular do próprio nome "Botafogo", sem qualquer ligação com estabelecimentos comerciais ou postos de combustível na região da sede.',
   'a estrela solitária no escudo é de 1907, depois de uma vitória num dia de eclipse solar',
   'Garrincha e Nilton Santos, ídolos eternos do Botafogo, foram bicampeões mundiais pela seleção em 1958 e 1962',
-  'o Botafogo foi campeão brasileiro em 1995',
+  'o Botafogo foi campeão brasileiro em 1964, 1995 e 2024',
   'o Botafogo foi campeão da Libertadores e do Brasileirão em 2024',
   'as cores do Botafogo são preto e branco, e o clube é conhecido também como "Glorioso"',
 ];
@@ -258,15 +291,29 @@ async function main(): Promise<void> {
       ? ` NÃO repita nenhuma destas mensagens já usadas antes (nem de forma quase idêntica — varie a frase, mesmo que o assunto seja parecido): ${historico.map((m) => `"${m}"`).join(' / ')}.`
       : '';
 
+  // Título REAL desta transmissão específica (vem da API, não é inventado) — ajuda
+  // a saudação/comentário soar como quem realmente entrou nessa live agora, e não
+  // um texto genérico que serviria pra qualquer transmissão.
+  const regraTituloLive = tituloLive
+    ? ` O título desta live agora é: "${tituloLive}". Se fizer sentido natural, pode se referir brevemente ao assunto dela (ex.: contra quem é o jogo, ou o tema da live), mas não é obrigatório nem precisa citar o título literalmente.`
+    : '';
+
+  // Mensagens recentes de OUTRAS pessoas no chat — só pra contexto/reação natural,
+  // NUNCA como fato a repetir (chat pode ter boato/desinformação/trollagem).
+  const regraChatContext =
+    !isGreeting && chatContext.length > 0
+      ? ` Mensagens recentes de outras pessoas no chat agora, só como contexto (NÃO trate como fato confirmado, chat pode ter boato ou trollagem; se reagir, reaja à torcida/vibe, não repita como se fosse verdade; NÃO cite o nome de ninguém; reagir é opcional, só se fizer sentido natural): ${chatContext.map((m) => `"${m.text}"`).join(' / ')}.`
+      : '';
+
   const task = isGreeting
-    ? `Escreva UMA saudação curta pro chat ao vivo de uma live do Botafogo no YouTube. Use exatamente esta saudação de acordo com a hora real agora ("${saudacaoPorHora()}"), sem trocar por outra. NÃO alegue ser o primeiro a comentar nem mencione ordem de chegada (isso irrita quem já está no chat). Inclua uma saudação alvinegra (tipo "saudações alvinegras") e mencione o Fogão; pode incluir uma expressão animada tipo "e aeeeeeee". Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} 1 frase curta, informal. NÃO use emojis. NÃO use markdown.${regraHistorico}`
-    : `Escreva UM comentário curto pro chat ao vivo de uma live do canal do Botafogo, trazendo algo interessante sobre o clube. ${regraDados} ${humorTexto} Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} Tom de torcedor natural e gentil, como uma pessoa real comentaria — nada de gírias agressivas ou exagero forçado. 1-2 frases curtas. NÃO use emojis. NÃO use markdown.${regraHistorico}`;
+    ? `Escreva UMA saudação curta pro chat ao vivo de uma live do Botafogo no YouTube. Use exatamente esta saudação de acordo com a hora real agora ("${saudacaoPorHora()}"), sem trocar por outra. NÃO alegue ser o primeiro a comentar nem mencione ordem de chegada (isso irrita quem já está no chat). Inclua uma saudação alvinegra (tipo "saudações alvinegras") e mencione o Fogão; pode incluir uma expressão animada tipo "e aeeeeeee". Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} 1 frase curta, informal. NÃO use emojis. NÃO use markdown.${regraTituloLive}${regraHistorico}`
+    : `Escreva UM comentário curto pro chat ao vivo de uma live do canal do Botafogo, trazendo algo interessante sobre o clube. ${regraDados} ${humorTexto} Quem comenta é um HOMEM — use concordância de gênero MASCULINA sempre. ${personaDetalhe} Tom de torcedor natural e gentil, como uma pessoa real comentaria — nada de gírias agressivas ou exagero forçado. 1-2 frases curtas. NÃO use emojis. NÃO use markdown.${regraTituloLive}${regraChatContext}${regraHistorico}`;
 
   const result = await runProviderChain(providers, [
     {
       role: 'system',
       content:
-        'Você é um torcedor do Botafogo (homem) comentando ao vivo no YouTube, de forma natural, como uma pessoa real digitaria no chat — não como um bot hiperativo. Sempre use concordância de gênero masculina ao falar de si mesmo. Nunca afirme um placar, jogador ou notícia que não esteja explicitamente nos dados fornecidos. O humor do comentário (feliz/triste/neutro) segue exatamente o que for indicado — nunca decida isso por conta própria. Seja sempre respeitoso e educado: evite gírias agressivas ou violentas (tipo "detonar", "destruir", "acabar com", "meter fogo"), palavrão, ou qualquer tom hostil, mesmo triste ou empolgado. NÃO use emojis em nenhuma mensagem.',
+        'Você é um torcedor do Botafogo (homem) comentando ao vivo no YouTube, de forma natural, como uma pessoa real digitaria no chat — não como um bot hiperativo. Sempre use concordância de gênero masculina ao falar de si mesmo. Nunca afirme um placar, jogador ou notícia que não esteja explicitamente nos dados fornecidos. O humor do comentário (feliz/triste/neutro) segue exatamente o que for indicado — nunca decida isso por conta própria. Seja sempre respeitoso e educado: evite gírias agressivas ou violentas (tipo "detonar", "destruir", "acabar com", "meter fogo"), palavrão, ou qualquer tom hostil, mesmo triste ou empolgado. NÃO use emojis em nenhuma mensagem. Se mensagens de outras pessoas no chat forem mostradas como contexto, trate-as só como clima/vibe da torcida, NUNCA como fato confirmado (podem ser boato, brincadeira ou trollagem) — e nunca entre em briga, provocação ou discussão com ninguém do chat.',
     },
     { role: 'user', content: task },
   ], { maxTokens: 150 });
