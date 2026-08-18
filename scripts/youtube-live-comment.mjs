@@ -220,6 +220,8 @@ async function tick(state, ownChannelId) {
       preShowVideoId: null,
       pendingGreeting: null,
       history: pushHistory(state.history, msg),
+      chatPageToken: null,
+      recentChat: [],
     };
   }
 
