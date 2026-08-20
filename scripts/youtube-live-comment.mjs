@@ -31,6 +31,19 @@ const POLL_INTERVAL_MS = 10_000; // varre o canal atrás de uma NOVA live (scrap
 // nesse vídeo via API — é o que decide se o bot chega no "pódio" (entre os 5
 // primeiros comentários) ou perde pra quem já está com o dedo no gatilho no chat.
 const PRESHOW_POLL_INTERVAL_MS = 5_000;
+// Enquanto o candidato de pré-show ainda está longe do horário agendado, poll bem
+// mais devagar — sem isso o bot fica batendo na API a cada 5s por HORAS (a sala de
+// espera abre bem antes do horário real) e estoura a cota diária da API do YouTube
+// antes da live de verdade começar, ficando incapaz de postar nada (nem a saudação)
+// pelo resto do dia até a cota resetar. Só acelera pra PRESHOW_POLL_INTERVAL_MS
+// perto do horário agendado (ver PRESHOW_NEAR_WINDOW_MS).
+const PRESHOW_FAR_POLL_INTERVAL_MS = 30_000;
+const PRESHOW_NEAR_WINDOW_MS = 10 * 60_000;
+// Enquanto já estamos dentro da live (depois da saudação), cada ciclo custa cota
+// (status do vídeo + leitura do chat) sem ganhar nada em "chegar primeiro" — isso
+// já foi decidido. Poll mais devagar aqui não perde a corrida, só economiza cota
+// pros ~15min de permanência.
+const ACTIVE_LIVE_POLL_INTERVAL_MS = 30_000;
 const COMMENT_INTERVAL_MS = 5 * 60_000;
 const MAX_MESSAGES_PER_STREAM = 4;
 // Bot não fica até o fim da live — entra, comenta um pouco e sai depois desse tempo,
@@ -83,6 +96,7 @@ function loadState() {
       attendedVideoId: null,
       preShowVideoId: null,
       pendingGreeting: null,
+      preShowScheduledStartTime: null,
       history: [],
       chatPageToken: null,
       recentChat: [],
@@ -99,6 +113,7 @@ function loadState() {
       attendedVideoId: null,
       preShowVideoId: null,
       pendingGreeting: null,
+      preShowScheduledStartTime: null,
       history: [],
       chatPageToken: null,
       recentChat: [],
@@ -172,11 +187,18 @@ async function tick(state, ownChannelId) {
     const details = await getLiveStreamingDetails(liveVideoId, accessToken);
     if (!details) {
       // vídeo sumiu (ex: live cancelada) — esquece esse candidato e volta a varrer o canal
-      return { ...state, preShowVideoId: null, pendingGreeting: null };
+      return { ...state, preShowVideoId: null, pendingGreeting: null, preShowScheduledStartTime: null };
     }
     if (!details.activeLiveChatId) {
+      // live já terminou (actualEndTime existe) sem a gente conseguir postar — chat
+      // fechado não vai reabrir. Sem isso o bot ficava preso nesse candidato morto
+      // pra sempre (nunca mais voltava a varrer o canal), perdendo qualquer live nova.
+      if (details.actualEndTime) {
+        log(`⏹️ ${liveVideoId} encerrou sem conseguirmos postar a saudação — abandona candidato e volta a varrer o canal`);
+        return { ...state, preShowVideoId: null, pendingGreeting: null, preShowScheduledStartTime: null };
+      }
       log('sem activeLiveChatId ainda, tenta de novo no próximo ciclo');
-      return { ...state, preShowVideoId: liveVideoId };
+      return { ...state, preShowVideoId: liveVideoId, preShowScheduledStartTime: details.scheduledStartTime };
     }
 
     // chat costuma abrir bem antes da transmissão real (vídeo ainda "upcoming"),
@@ -202,7 +224,13 @@ async function tick(state, ownChannelId) {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
     } catch (err) {
       log('⚠️ falha ao postar a saudação inicial, aguarda backoff antes de tentar de novo:', err.message);
-      return { ...state, preShowVideoId: liveVideoId, pendingGreeting: msg, lastAttemptAt: Date.now() };
+      return {
+        ...state,
+        preShowVideoId: liveVideoId,
+        pendingGreeting: msg,
+        lastAttemptAt: Date.now(),
+        preShowScheduledStartTime: details.scheduledStartTime,
+      };
     }
     log(`✅ saudação postada: ${msg}`);
 
@@ -219,6 +247,7 @@ async function tick(state, ownChannelId) {
       attendedVideoId: state.attendedVideoId,
       preShowVideoId: null,
       pendingGreeting: null,
+      preShowScheduledStartTime: null,
       history: pushHistory(state.history, msg),
       chatPageToken: null,
       recentChat: [],
@@ -340,10 +369,20 @@ async function main() {
     } catch (err) {
       log('❌ erro no ciclo:', err.message);
     }
-    // já tem um candidato conhecido esperando virar "ao vivo de verdade" →
-    // poll rápido; senão, só varrendo o canal por uma nova live, sem pressa.
+    // já tem um candidato conhecido esperando virar "ao vivo de verdade" → poll
+    // rápido só perto do horário agendado (ver PRESHOW_NEAR_WINDOW_MS); longe disso,
+    // poll bem mais devagar pra não estourar a cota da API horas antes da live
+    // começar de verdade. Sem candidato, só varrendo o canal (scraping, sem custo).
     const waitingOnCandidate = !state.videoId && Boolean(state.preShowVideoId);
-    await new Promise((r) => setTimeout(r, waitingOnCandidate ? PRESHOW_POLL_INTERVAL_MS : POLL_INTERVAL_MS));
+    let delay = POLL_INTERVAL_MS;
+    if (waitingOnCandidate) {
+      const scheduledAt = state.preShowScheduledStartTime ? new Date(state.preShowScheduledStartTime).getTime() : null;
+      const nearStart = scheduledAt === null || Date.now() >= scheduledAt - PRESHOW_NEAR_WINDOW_MS;
+      delay = nearStart ? PRESHOW_POLL_INTERVAL_MS : PRESHOW_FAR_POLL_INTERVAL_MS;
+    } else if (state.videoId) {
+      delay = ACTIVE_LIVE_POLL_INTERVAL_MS;
+    }
+    await new Promise((r) => setTimeout(r, delay));
   }
 }
 
