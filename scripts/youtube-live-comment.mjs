@@ -16,14 +16,18 @@ import {
   getOwnChannelId,
   postLiveChatMessage,
 } from '../lib/youtube-api.mjs';
+import { startControlServer } from '../lib/control-server.mjs';
 
 const execFileAsync = promisify(execFile);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const STATE_FILE = path.join(ROOT, 'data', 'state.json');
+const DATA_DIR = path.join(ROOT, 'data');
+const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const TSX_BIN = path.join(ROOT, '..', 'ariaBot', 'node_modules', '.bin', 'tsx');
 const GEN_SCRIPT = path.join(ROOT, 'scripts', 'generate-message.ts');
+const UI_HTML_PATH = path.join(ROOT, 'ui', 'index.html');
+const CONTROL_PORT = Number(process.env.CONTROL_UI_PORT) || 8787;
 
 const HANDLE = '@SetorVisitante';
 const POLL_INTERVAL_MS = 10_000; // varre o canal atrás de uma NOVA live (scraping, sem custo de cota)
@@ -100,6 +104,8 @@ function loadState() {
       history: [],
       chatPageToken: null,
       recentChat: [],
+      photoQuestionAnswered: false,
+      forcedGreetingText: null,
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -117,6 +123,8 @@ function loadState() {
       history: [],
       chatPageToken: null,
       recentChat: [],
+      photoQuestionAnswered: false,
+      forcedGreetingText: null,
     };
   }
 }
@@ -148,6 +156,7 @@ async function generateMessage(isGreeting, history = [], extra = {}) {
     if (extra.chatContext?.length > 0) {
       args.push(`--chat-context-b64=${Buffer.from(JSON.stringify(extra.chatContext), 'utf8').toString('base64')}`);
     }
+    if (extra.forcePhotoAnswer) args.push('--force-photo-answer');
     const { stdout } = await execFileAsync(TSX_BIN, args, { timeout: 30_000 });
     const text = stdout.trim();
     // segurança extra: mesmo pedindo pro LLM não repetir, confere de verdade —
@@ -218,7 +227,13 @@ async function tick(state, ownChannelId) {
     // sem alegar ser "o primeiro" a comentar — isso irritava outras pessoas no chat.
     // Passa o título real da live pra saudação poder soar como quem realmente
     // entrou nessa transmissão específica, em vez de um texto genérico.
-    const msg = state.pendingGreeting ?? (await generateMessage(true, state.history, { title: details.title }));
+    const msg =
+      state.forcedGreetingText ??
+      state.pendingGreeting ??
+      (await generateMessage(true, state.history, {
+        title: details.title,
+        forcePhotoAnswer: !state.photoQuestionAnswered,
+      }));
 
     try {
       await postLiveChatMessage(details.activeLiveChatId, msg, accessToken);
@@ -251,6 +266,9 @@ async function tick(state, ownChannelId) {
       history: pushHistory(state.history, msg),
       chatPageToken: null,
       recentChat: [],
+      photoQuestionAnswered: true,
+      // só vale pra UMA saudação (a próxima live) — some sozinho depois de usada.
+      forcedGreetingText: null,
     };
   }
 
@@ -269,6 +287,7 @@ async function tick(state, ownChannelId) {
       attendedVideoId: null,
       preShowVideoId: null,
       pendingGreeting: null,
+      forcedGreetingText: state.forcedGreetingText,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -314,6 +333,7 @@ async function tick(state, ownChannelId) {
       attendedVideoId: state.videoId,
       preShowVideoId: null,
       pendingGreeting: null,
+      forcedGreetingText: state.forcedGreetingText,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -355,17 +375,36 @@ async function tick(state, ownChannelId) {
 
 async function main() {
   log(`iniciando bot de live chat para ${HANDLE}`);
-  let state = loadState();
+  // caixa mutável (em vez de só a variável local `state`) pra a UI de controle
+  // conseguir ler o estado atual e aplicar mudanças (ex: saudação forçada) entre
+  // um ciclo e outro do loop principal.
+  const stateBox = { current: loadState() };
   // buscado uma vez só (não muda durante a execução) — usado pra filtrar as
   // próprias mensagens fora do contexto de chat passado pro LLM.
   const ownChannelId = await getOwnChannelId(await getAccessToken()).catch((err) => {
     log('⚠️ não consegui obter o próprio channelId, contexto de chat não vai filtrar as próprias mensagens:', err.message);
     return null;
   });
+
+  startControlServer({
+    port: CONTROL_PORT,
+    dataDir: DATA_DIR,
+    uiHtmlPath: UI_HTML_PATH,
+    log,
+    getState: () => stateBox.current,
+    setForcedGreeting: (text) => {
+      stateBox.current = { ...stateBox.current, forcedGreetingText: text };
+      saveState(stateBox.current);
+      log(text ? `🖥️ saudação forçada definida via UI: "${text}"` : '🖥️ saudação forçada limpa via UI');
+    },
+    testMessage: ({ greeting, title, chatContext, forcePhotoAnswer }) =>
+      generateMessage(greeting, stateBox.current.history, { title, chatContext, forcePhotoAnswer }),
+  });
+
   for (;;) {
     try {
-      state = await tick(state, ownChannelId);
-      saveState(state);
+      stateBox.current = await tick(stateBox.current, ownChannelId);
+      saveState(stateBox.current);
     } catch (err) {
       log('❌ erro no ciclo:', err.message);
     }
@@ -373,13 +412,15 @@ async function main() {
     // rápido só perto do horário agendado (ver PRESHOW_NEAR_WINDOW_MS); longe disso,
     // poll bem mais devagar pra não estourar a cota da API horas antes da live
     // começar de verdade. Sem candidato, só varrendo o canal (scraping, sem custo).
-    const waitingOnCandidate = !state.videoId && Boolean(state.preShowVideoId);
+    const waitingOnCandidate = !stateBox.current.videoId && Boolean(stateBox.current.preShowVideoId);
     let delay = POLL_INTERVAL_MS;
     if (waitingOnCandidate) {
-      const scheduledAt = state.preShowScheduledStartTime ? new Date(state.preShowScheduledStartTime).getTime() : null;
+      const scheduledAt = stateBox.current.preShowScheduledStartTime
+        ? new Date(stateBox.current.preShowScheduledStartTime).getTime()
+        : null;
       const nearStart = scheduledAt === null || Date.now() >= scheduledAt - PRESHOW_NEAR_WINDOW_MS;
       delay = nearStart ? PRESHOW_POLL_INTERVAL_MS : PRESHOW_FAR_POLL_INTERVAL_MS;
-    } else if (state.videoId) {
+    } else if (stateBox.current.videoId) {
       delay = ACTIVE_LIVE_POLL_INTERVAL_MS;
     }
     await new Promise((r) => setTimeout(r, delay));

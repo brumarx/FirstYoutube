@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SetorVisitante — controle do bot</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0d0d0d;
+    --panel: #1a1a1a;
+    --border: #2e2e2e;
+    --text: #f2f2f2;
+    --muted: #9a9a9a;
+    --accent: #d4af37;
+    --danger: #c0392b;
+    --ok: #2e8b57;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+    max-width: 640px;
+    margin-inline: auto;
+  }
+  h1 { font-size: 1.3rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.85rem; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  .panel h2 { font-size: 1rem; margin: 0 0 12px; color: var(--accent); }
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+  textarea, input[type=text], input[type=password] {
+    width: 100%;
+    background: #111;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    resize: vertical;
+  }
+  textarea { min-height: 70px; }
+  .row { margin-bottom: 12px; }
+  .checkrow { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .checkrow label { margin: 0; color: var(--text); }
+  button {
+    background: var(--accent);
+    color: #111;
+    border: none;
+    border-radius: 6px;
+    padding: 9px 16px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.9rem;
+  }
+  button.secondary { background: #333; color: var(--text); }
+  button.danger { background: var(--danger); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; }
+  .status-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.9rem; }
+  .status-grid dt { color: var(--muted); }
+  .status-grid dd { margin: 0; word-break: break-word; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; }
+  .badge.on { background: var(--ok); color: #fff; }
+  .badge.off { background: #333; color: var(--muted); }
+  ul.msglist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  ul.msglist li { background: #111; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 0.85rem; }
+  .result { margin-top: 12px; background: #111; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; }
+  .msg { font-size: 0.85rem; margin-top: 8px; }
+  .msg.err { color: #ff8a8a; }
+  .msg.ok { color: #8adf9a; }
+  #login { display: flex; flex-direction: column; gap: 10px; }
+  #app { display: none; }
+  small.hint { color: var(--muted); display: block; margin-top: 4px; }
+</style>
+</head>
+<body>
+  <h1>⚫⚪ SetorVisitante</h1>
+  <p class="sub">Controle do bot de chat ao vivo</p>
+
+  <div id="login" class="panel">
+    <h2>Entrar</h2>
+    <div class="row">
+      <label for="token-input">Token de acesso</label>
+      <input id="token-input" type="password" placeholder="cole o token aqui" />
+    </div>
+    <button id="login-btn">Entrar</button>
+    <div id="login-msg" class="msg"></div>
+  </div>
+
+  <div id="app">
+    <div class="panel">
+      <h2>Status</h2>
+      <dl class="status-grid" id="status-grid"></dl>
+      <div class="row" style="margin-top:12px">
+        <span class="badge" id="badge-forced"></span>
+      </div>
+      <h2 style="margin-top:16px">Últimas mensagens postadas</h2>
+      <ul class="msglist" id="history-list"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>Saudação forçada (próxima live)</h2>
+      <p class="sub" style="margin-top:-6px">
+        Define o texto EXATO que o bot vai postar na próxima saudação, sem passar pela IA.
+        Some sozinho depois de usado uma vez.
+      </p>
+      <div class="row">
+        <textarea id="forced-text" placeholder="ex: Professor Pardal a Revanche...burro pra kct"></textarea>
+      </div>
+      <div class="btnrow">
+        <button id="set-forced-btn">Definir</button>
+        <button id="clear-forced-btn" class="secondary">Limpar</button>
+      </div>
+      <div id="forced-msg" class="msg"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Testar geração de mensagem (IA)</h2>
+      <p class="sub" style="margin-top:-6px">
+        Gera uma mensagem de teste com o mesmo motor do bot (usa o histórico real pra não repetir),
+        sem postar nada nem alterar o estado.
+      </p>
+      <div class="checkrow">
+        <input type="checkbox" id="test-greeting" />
+        <label for="test-greeting">É uma saudação (em vez de comentário)</label>
+      </div>
+      <div class="row">
+        <label for="test-title">Título da live (opcional)</label>
+        <input id="test-title" type="text" placeholder="ex: BOTAFOGO x Flamengo | BRASILEIRÃO" />
+      </div>
+      <div class="row">
+        <label for="test-chat">Mensagens do chat (opcional, uma por linha, "autor: texto")</label>
+        <textarea id="test-chat" placeholder="torcedor: alô Dep, bora Fogão!"></textarea>
+      </div>
+      <div class="checkrow">
+        <input type="checkbox" id="test-photo" />
+        <label for="test-photo">Forçar resposta sobre a foto/Sesimbra (só saudação)</label>
+      </div>
+      <div class="btnrow">
+        <button id="test-btn">Gerar</button>
+      </div>
+      <div id="test-result" class="result" style="display:none"></div>
+      <div id="test-msg" class="msg"></div>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const TOKEN_KEY = 'sv-control-token';
+
+  function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+
+  async function api(path, opts = {}) {
+    const res = await fetch(path, {
+      ...opts,
+      headers: {
+        ...(opts.body ? { 'Content-Type': 'application/json' } : {}),
+        Authorization: 'Bearer ' + getToken(),
+        ...opts.headers,
+      },
+    });
+    if (res.status === 401) throw new Error('unauthorized');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ('erro HTTP ' + res.status));
+    }
+    return res.json();
+  }
+
+  function showApp() {
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    refreshStatus();
+  }
+
+  function fmtDate(ms) {
+    if (!ms) return '—';
+    return new Date(ms).toLocaleString('pt-BR');
+  }
+
+  async function refreshStatus() {
+    let state;
+    try {
+      state = await api('/api/state');
+    } catch (err) {
+      if (err.message === 'unauthorized') {
+        document.getElementById('login').style.display = 'flex';
+        document.getElementById('app').style.display = 'none';
+      }
+      return;
+    }
+    const grid = document.getElementById('status-grid');
+    grid.innerHTML = `
+      <dt>Ao vivo agora</dt><dd>${state.live ? 'sim (' + state.videoId + ')' : 'não'}</dd>
+      <dt>Mensagens postadas</dt><dd>${state.messagesSent ?? 0}</dd>
+      <dt>Pré-show em espera</dt><dd>${state.preShowVideoId ?? '—'}</dd>
+      <dt>Pergunta da foto respondida</dt><dd>${state.photoQuestionAnswered ? 'sim' : 'não'}</dd>
+    `;
+    const badge = document.getElementById('badge-forced');
+    if (state.forcedGreetingText) {
+      badge.className = 'badge on';
+      badge.textContent = 'saudação forçada ativa: "' + state.forcedGreetingText + '"';
+      document.getElementById('forced-text').value = state.forcedGreetingText;
+    } else {
+      badge.className = 'badge off';
+      badge.textContent = 'sem saudação forçada — próxima live usa IA normalmente';
+    }
+    const list = document.getElementById('history-list');
+    list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function parseChatLines(raw) {
+    return raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const idx = line.indexOf(':');
+        if (idx === -1) return { author: 'torcedor', text: line };
+        return { author: line.slice(0, idx).trim() || 'torcedor', text: line.slice(idx + 1).trim() };
+      })
+      .filter((m) => m.text);
+  }
+
+  document.getElementById('login-btn').addEventListener('click', async () => {
+    const val = document.getElementById('token-input').value.trim();
+    if (!val) return;
+    setToken(val);
+    const msgEl = document.getElementById('login-msg');
+    try {
+      await api('/api/state');
+      msgEl.textContent = '';
+      showApp();
+    } catch {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'token inválido';
+    }
+  });
+
+  document.getElementById('set-forced-btn').addEventListener('click', async () => {
+    const text = document.getElementById('forced-text').value;
+    const msgEl = document.getElementById('forced-msg');
+    try {
+      await api('/api/forced-greeting', { method: 'POST', body: JSON.stringify({ text }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'salvo.';
+      refreshStatus();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    }
+  });
+
+  document.getElementById('clear-forced-btn').addEventListener('click', async () => {
+    document.getElementById('forced-text').value = '';
+    const msgEl = document.getElementById('forced-msg');
+    try {
+      await api('/api/forced-greeting', { method: 'POST', body: JSON.stringify({ text: '' }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'limpo.';
+      refreshStatus();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    }
+  });
+
+  document.getElementById('test-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('test-btn');
+    const resultEl = document.getElementById('test-result');
+    const msgEl = document.getElementById('test-msg');
+    btn.disabled = true;
+    msgEl.textContent = '';
+    try {
+      const payload = {
+        greeting: document.getElementById('test-greeting').checked,
+        title: document.getElementById('test-title').value.trim() || undefined,
+        chatContext: parseChatLines(document.getElementById('test-chat').value),
+        forcePhotoAnswer: document.getElementById('test-photo').checked,
+      };
+      const { text } = await api('/api/test-message', { method: 'POST', body: JSON.stringify(payload) });
+      resultEl.style.display = 'block';
+      resultEl.textContent = text || '(vazio — todos os provedores falharam)';
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  const saved = getToken();
+  if (saved) showApp(); else document.getElementById('token-input').focus();
+  setInterval(() => { if (document.getElementById('app').style.display !== 'none') refreshStatus(); }, 15000);
+})();
+</script>
+</body>
+</html>
