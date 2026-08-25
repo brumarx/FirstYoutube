@@ -210,10 +210,16 @@
     if (state.forcedGreetingText) {
       badge.className = 'badge on';
       badge.textContent = 'saudação forçada ativa: "' + state.forcedGreetingText + '"';
-      document.getElementById('forced-text').value = state.forcedGreetingText;
     } else {
       badge.className = 'badge off';
       badge.textContent = 'sem saudação forçada — próxima live usa IA normalmente';
+    }
+    // só preenche o campo com o valor do servidor se o usuário não estiver com
+    // o foco nele digitando agora — senão o refresh periódico apagava o que
+    // a pessoa estava escrevendo no meio da edição.
+    const forcedTextEl = document.getElementById('forced-text');
+    if (document.activeElement !== forcedTextEl) {
+      forcedTextEl.value = state.forcedGreetingText || '';
     }
     const list = document.getElementById('history-list');
     list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
