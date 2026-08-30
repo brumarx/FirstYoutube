@@ -63,6 +63,14 @@ const MAX_HISTORY = 30;
 // Quantas mensagens recentes de OUTRAS pessoas no chat manter como contexto pro
 // LLM poder reagir de forma natural — só da live atual, reseta a cada transmissão.
 const MAX_CHAT_CONTEXT = 10;
+// Dias da semana (0=domingo .. 6=sábado) em que o bot pode entrar numa live nova.
+// Controlável pela UI (ver ui/index.html) — todos habilitados por padrão.
+const DEFAULT_ENABLED_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+
+function diaDaSemanaEmSesimbra() {
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Lisbon', weekday: 'short' }).format(new Date());
+  return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[weekday];
+}
 
 // Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
 // no chat) — só um "boa tarde"/"bom dia"/"boa noite" real (hora atual em
@@ -104,8 +112,8 @@ function loadState() {
       history: [],
       chatPageToken: null,
       recentChat: [],
-      photoQuestionAnswered: false,
       forcedGreetingText: null,
+      enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -123,8 +131,8 @@ function loadState() {
       history: [],
       chatPageToken: null,
       recentChat: [],
-      photoQuestionAnswered: false,
       forcedGreetingText: null,
+      enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
     };
   }
 }
@@ -156,7 +164,6 @@ async function generateMessage(isGreeting, history = [], extra = {}) {
     if (extra.chatContext?.length > 0) {
       args.push(`--chat-context-b64=${Buffer.from(JSON.stringify(extra.chatContext), 'utf8').toString('base64')}`);
     }
-    if (extra.forcePhotoAnswer) args.push('--force-photo-answer');
     const { stdout } = await execFileAsync(TSX_BIN, args, { timeout: 30_000 });
     const text = stdout.trim();
     // segurança extra: mesmo pedindo pro LLM não repetir, confere de verdade —
@@ -186,6 +193,10 @@ async function tick(state, ownChannelId) {
     // que vira "ao vivo de verdade" em vez de só notar até 30s depois.
     let liveVideoId = state.preShowVideoId;
     if (!liveVideoId) {
+      // dia da semana desabilitado na UI → nem varre o canal (economiza a cota
+      // e evita entrar numa live num dia que a pessoa marcou que não vai estar).
+      const enabledWeekdays = state.enabledWeekdays ?? DEFAULT_ENABLED_WEEKDAYS;
+      if (!enabledWeekdays.includes(diaDaSemanaEmSesimbra())) return state;
       liveVideoId = await checkChannelLive(HANDLE);
       if (!liveVideoId) return state;
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
@@ -232,7 +243,6 @@ async function tick(state, ownChannelId) {
       state.pendingGreeting ??
       (await generateMessage(true, state.history, {
         title: details.title,
-        forcePhotoAnswer: !state.photoQuestionAnswered,
       }));
 
     try {
@@ -266,9 +276,9 @@ async function tick(state, ownChannelId) {
       history: pushHistory(state.history, msg),
       chatPageToken: null,
       recentChat: [],
-      photoQuestionAnswered: true,
       // só vale pra UMA saudação (a próxima live) — some sozinho depois de usada.
       forcedGreetingText: null,
+      enabledWeekdays: state.enabledWeekdays,
     };
   }
 
@@ -288,6 +298,7 @@ async function tick(state, ownChannelId) {
       preShowVideoId: null,
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
+      enabledWeekdays: state.enabledWeekdays,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -334,6 +345,7 @@ async function tick(state, ownChannelId) {
       preShowVideoId: null,
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
+      enabledWeekdays: state.enabledWeekdays,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -397,8 +409,13 @@ async function main() {
       saveState(stateBox.current);
       log(text ? `🖥️ saudação forçada definida via UI: "${text}"` : '🖥️ saudação forçada limpa via UI');
     },
-    testMessage: ({ greeting, title, chatContext, forcePhotoAnswer }) =>
-      generateMessage(greeting, stateBox.current.history, { title, chatContext, forcePhotoAnswer }),
+    setEnabledWeekdays: (days) => {
+      stateBox.current = { ...stateBox.current, enabledWeekdays: days };
+      saveState(stateBox.current);
+      log(`🖥️ dias de entrada na live definidos via UI: [${days.join(', ')}]`);
+    },
+    testMessage: ({ greeting, title, chatContext }) =>
+      generateMessage(greeting, stateBox.current.history, { title, chatContext }),
   });
 
   for (;;) {

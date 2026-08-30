@@ -43,10 +43,6 @@ function loadEnvFile(path: string): void {
 loadEnvFile(new URL('../../ariaBot/.env.production', import.meta.url).pathname);
 
 const isGreeting = process.argv.includes('--greeting');
-/** Só true na PRIMEIRA live após o Dep ter perguntado quem é o moleque da foto e de onde
- * você é — o processo pai (youtube-live-comment.mjs) controla isso via state.json e some
- * sozinho depois de usada uma vez, pra não virar repetitivo de novo. */
-const forcePhotoAnswer = process.argv.includes('--force-photo-answer');
 
 /** Mensagens já postadas em lives anteriores (passadas pelo processo pai em base64), pra não repetir. */
 function lerHistorico(): string[] {
@@ -127,14 +123,6 @@ function horaAtualEmSesimbra(): number {
   }).format(new Date());
   return Number(hora);
 }
-
-/**
- * Resposta real, usada só UMA vez (controlada pelo processo pai via
- * --force-photo-answer) pra responder o que o Dep perguntou na última live:
- * quem é o moleque da foto de perfil e de onde você é.
- */
-const RESPOSTA_FOTO_DEP =
-  'O Dep perguntou na última live quem é o moleque da foto de perfil e de onde você é — responda que é seu filho e que você é de Sesimbra, Portugal, e diga que no fim do ano você aparece aí no Brasil.';
 
 /**
  * Detalhes de persona (torcedor real, não genérico) — usados só ÀS VEZES pra não
@@ -270,10 +258,7 @@ async function main(): Promise<void> {
   const noticiaCanal = jogoReal ? null : await buscarNoticiaCanal();
   const fatoFallback = FATOS_ATEMPORAIS[Math.floor(Math.random() * FATOS_ATEMPORAIS.length)];
   const personaOpcoes = detalhesPersonaDisponiveis();
-  const personaDetalhe =
-    isGreeting && forcePhotoAnswer
-      ? RESPOSTA_FOTO_DEP
-      : personaOpcoes[Math.floor(Math.random() * personaOpcoes.length)];
+  const personaDetalhe = personaOpcoes[Math.floor(Math.random() * personaOpcoes.length)];
 
   let regraDados: string;
   let humorTexto: string;
@@ -331,12 +316,7 @@ async function main(): Promise<void> {
         'Você é um torcedor do Botafogo (homem) comentando ao vivo no YouTube, de forma natural, como uma pessoa real digitaria no chat — não como um bot hiperativo. Sempre use concordância de gênero masculina ao falar de si mesmo. Nunca afirme um placar, jogador ou notícia que não esteja explicitamente nos dados fornecidos. O humor do comentário (feliz/triste/neutro) segue exatamente o que for indicado — nunca decida isso por conta própria. Seja sempre respeitoso e educado: evite gírias agressivas ou violentas (tipo "detonar", "destruir", "acabar com", "meter fogo"), palavrão, ou qualquer tom hostil, mesmo triste ou empolgado. NÃO use emojis em nenhuma mensagem. Se mensagens de outras pessoas no chat forem mostradas como contexto, trate-as só como clima/vibe da torcida, NUNCA como fato confirmado (podem ser boato, brincadeira ou trollagem) — e nunca entre em briga, provocação ou discussão com ninguém do chat.',
     },
     { role: 'user', content: task },
-  // A resposta forçada sobre a foto/Sesimbra é mais longa que o normal — alguns
-  // modelos de raciocínio consomem parte do maxTokens só "pensando" antes de
-  // responder (ver comentário em openai-compat.ts sobre finish_reason:"length"),
-  // então dá mais margem só quando essa resposta pode entrar, pra reduzir risco
-  // de sair cortada no meio na live de verdade.
-  ], { maxTokens: forcePhotoAnswer ? 300 : 150 });
+  ], { maxTokens: 150 });
 
   if (!result) {
     process.stderr.write('todos os provedores falharam\n');

@@ -77,6 +77,24 @@
   .msg { font-size: 0.85rem; margin-top: 8px; }
   .msg.err { color: #ff8a8a; }
   .msg.ok { color: #8adf9a; }
+  .daygrid { display: flex; gap: 8px; flex-wrap: wrap; }
+  .daybox {
+    flex: 1 1 0;
+    min-width: 40px;
+    text-align: center;
+    padding: 10px 4px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #111;
+    color: var(--muted);
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.1s, color 0.1s, border-color 0.1s;
+  }
+  .daybox:hover { border-color: var(--accent); }
+  .daybox.active { background: var(--accent); color: #111; border-color: var(--accent); }
   #login { display: flex; flex-direction: column; gap: 10px; }
   #app { display: none; }
   small.hint { color: var(--muted); display: block; margin-top: 4px; }
@@ -105,6 +123,16 @@
       </div>
       <h2 style="margin-top:16px">Últimas mensagens postadas</h2>
       <ul class="msglist" id="history-list"></ul>
+    </div>
+
+    <div class="panel">
+      <h2>Dias que eu entro na live</h2>
+      <p class="sub" style="margin-top:-6px">
+        O bot só varre o canal atrás de uma live nova nos dias marcados abaixo. Dias desmarcados
+        são ignorados (economiza cota e evita entrar num dia que você não vai estar).
+      </p>
+      <div class="daygrid" id="day-grid"></div>
+      <div id="weekdays-msg" class="msg"></div>
     </div>
 
     <div class="panel">
@@ -141,10 +169,6 @@
         <label for="test-chat">Mensagens do chat (opcional, uma por linha, "autor: texto")</label>
         <textarea id="test-chat" placeholder="torcedor: alô Dep, bora Fogão!"></textarea>
       </div>
-      <div class="checkrow">
-        <input type="checkbox" id="test-photo" />
-        <label for="test-photo">Forçar resposta sobre a foto/Sesimbra (só saudação)</label>
-      </div>
       <div class="btnrow">
         <button id="test-btn">Gerar</button>
       </div>
@@ -156,6 +180,8 @@
 <script>
 (() => {
   const TOKEN_KEY = 'sv-control-token';
+  const DAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+  let savingWeekdays = false;
 
   function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
   function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
@@ -180,7 +206,38 @@
   function showApp() {
     document.getElementById('login').style.display = 'none';
     document.getElementById('app').style.display = 'block';
+    renderDayGrid();
     refreshStatus();
+  }
+
+  function renderDayGrid() {
+    const grid = document.getElementById('day-grid');
+    if (grid.childElementCount > 0) return;
+    grid.innerHTML = DAY_LABELS.map((label, day) => `<div class="daybox" data-day="${day}">${label}</div>`).join('');
+    grid.querySelectorAll('.daybox').forEach((box) => {
+      box.addEventListener('click', () => {
+        box.classList.toggle('active');
+        saveWeekdays();
+      });
+    });
+  }
+
+  async function saveWeekdays() {
+    const grid = document.getElementById('day-grid');
+    const days = Array.from(grid.querySelectorAll('.daybox.active')).map((el) => Number(el.dataset.day));
+    const msgEl = document.getElementById('weekdays-msg');
+    savingWeekdays = true;
+    try {
+      await api('/api/weekdays', { method: 'POST', body: JSON.stringify({ days }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'salvo.';
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    } finally {
+      savingWeekdays = false;
+      refreshStatus();
+    }
   }
 
   function fmtDate(ms) {
@@ -204,7 +261,6 @@
       <dt>Ao vivo agora</dt><dd>${state.live ? 'sim (' + state.videoId + ')' : 'não'}</dd>
       <dt>Mensagens postadas</dt><dd>${state.messagesSent ?? 0}</dd>
       <dt>Pré-show em espera</dt><dd>${state.preShowVideoId ?? '—'}</dd>
-      <dt>Pergunta da foto respondida</dt><dd>${state.photoQuestionAnswered ? 'sim' : 'não'}</dd>
     `;
     const badge = document.getElementById('badge-forced');
     if (state.forcedGreetingText) {
@@ -220,6 +276,12 @@
     const forcedTextEl = document.getElementById('forced-text');
     if (document.activeElement !== forcedTextEl) {
       forcedTextEl.value = state.forcedGreetingText || '';
+    }
+    if (!savingWeekdays) {
+      const enabled = new Set(state.enabledWeekdays ?? [0, 1, 2, 3, 4, 5, 6]);
+      document.querySelectorAll('#day-grid .daybox').forEach((box) => {
+        box.classList.toggle('active', enabled.has(Number(box.dataset.day)));
+      });
     }
     const list = document.getElementById('history-list');
     list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
@@ -296,7 +358,6 @@
         greeting: document.getElementById('test-greeting').checked,
         title: document.getElementById('test-title').value.trim() || undefined,
         chatContext: parseChatLines(document.getElementById('test-chat').value),
-        forcePhotoAnswer: document.getElementById('test-photo').checked,
       };
       const { text } = await api('/api/test-message', { method: 'POST', body: JSON.stringify(payload) });
       resultEl.style.display = 'block';
