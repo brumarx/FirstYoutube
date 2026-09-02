@@ -136,6 +136,24 @@
     </div>
 
     <div class="panel">
+      <h2>Comentários durante a live</h2>
+      <p class="sub" style="margin-top:-6px">
+        A saudação de entrada sempre é postada. Isso aqui controla só os comentários periódicos
+        depois dela — se o bot comenta ou fica calado, e o máximo de mensagens (contando a
+        saudação) numa mesma live.
+      </p>
+      <div class="checkrow">
+        <input type="checkbox" id="commenting-enabled" />
+        <label for="commenting-enabled">Comentar periodicamente durante a live</label>
+      </div>
+      <div class="row">
+        <label for="max-messages">Máximo de mensagens por live</label>
+        <input id="max-messages" type="text" inputmode="numeric" style="max-width:80px" />
+      </div>
+      <div id="comment-settings-msg" class="msg"></div>
+    </div>
+
+    <div class="panel">
       <h2>Saudação forçada (próxima live)</h2>
       <p class="sub" style="margin-top:-6px">
         Define o texto EXATO que o bot vai postar na próxima saudação, sem passar pela IA.
@@ -182,6 +200,7 @@
   const TOKEN_KEY = 'sv-control-token';
   const DAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
   let savingWeekdays = false;
+  let savingCommentSettings = false;
 
   function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
   function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
@@ -240,6 +259,29 @@
     }
   }
 
+  async function saveCommentSettings() {
+    const enabled = document.getElementById('commenting-enabled').checked;
+    const max = Number(document.getElementById('max-messages').value);
+    const msgEl = document.getElementById('comment-settings-msg');
+    if (!Number.isInteger(max) || max < 0 || max > 50) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'máximo deve ser um número inteiro entre 0 e 50';
+      return;
+    }
+    savingCommentSettings = true;
+    try {
+      await api('/api/comment-settings', { method: 'POST', body: JSON.stringify({ enabled, max }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'salvo.';
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    } finally {
+      savingCommentSettings = false;
+      refreshStatus();
+    }
+  }
+
   function fmtDate(ms) {
     if (!ms) return '—';
     return new Date(ms).toLocaleString('pt-BR');
@@ -283,6 +325,11 @@
         box.classList.toggle('active', enabled.has(Number(box.dataset.day)));
       });
     }
+    const maxMessagesEl = document.getElementById('max-messages');
+    if (!savingCommentSettings && document.activeElement !== maxMessagesEl) {
+      document.getElementById('commenting-enabled').checked = state.commentingEnabled !== false;
+      maxMessagesEl.value = state.maxMessagesPerStream ?? 4;
+    }
     const list = document.getElementById('history-list');
     list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
   }
@@ -318,6 +365,9 @@
       msgEl.textContent = 'token inválido';
     }
   });
+
+  document.getElementById('commenting-enabled').addEventListener('change', saveCommentSettings);
+  document.getElementById('max-messages').addEventListener('change', saveCommentSettings);
 
   document.getElementById('set-forced-btn').addEventListener('click', async () => {
     const text = document.getElementById('forced-text').value;

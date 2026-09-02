@@ -49,7 +49,11 @@ const PRESHOW_NEAR_WINDOW_MS = 10 * 60_000;
 // pros ~15min de permanência.
 const ACTIVE_LIVE_POLL_INTERVAL_MS = 30_000;
 const COMMENT_INTERVAL_MS = 5 * 60_000;
-const MAX_MESSAGES_PER_STREAM = 4;
+// Padrões pro comentário periódico (além da saudação) — ambos controláveis pela UI:
+// se comentar durante a live está ligado, e quantas mensagens no máximo por live
+// (contando a saudação).
+const DEFAULT_COMMENTING_ENABLED = true;
+const DEFAULT_MAX_MESSAGES_PER_STREAM = 4;
 // Bot não fica até o fim da live — entra, comenta um pouco e sai depois desse tempo,
 // mesmo que a live continue ao vivo.
 const STAY_DURATION_MS = 15 * 60_000;
@@ -114,6 +118,8 @@ function loadState() {
       recentChat: [],
       forcedGreetingText: null,
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
+      commentingEnabled: DEFAULT_COMMENTING_ENABLED,
+      maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -133,6 +139,8 @@ function loadState() {
       recentChat: [],
       forcedGreetingText: null,
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
+      commentingEnabled: DEFAULT_COMMENTING_ENABLED,
+      maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
     };
   }
 }
@@ -279,6 +287,8 @@ async function tick(state, ownChannelId) {
       // só vale pra UMA saudação (a próxima live) — some sozinho depois de usada.
       forcedGreetingText: null,
       enabledWeekdays: state.enabledWeekdays,
+      commentingEnabled: state.commentingEnabled,
+      maxMessagesPerStream: state.maxMessagesPerStream,
     };
   }
 
@@ -299,6 +309,8 @@ async function tick(state, ownChannelId) {
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
       enabledWeekdays: state.enabledWeekdays,
+      commentingEnabled: state.commentingEnabled,
+      maxMessagesPerStream: state.maxMessagesPerStream,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -346,15 +358,19 @@ async function tick(state, ownChannelId) {
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
       enabledWeekdays: state.enabledWeekdays,
+      commentingEnabled: state.commentingEnabled,
+      maxMessagesPerStream: state.maxMessagesPerStream,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
     };
   }
 
+  const maxMessages = state.maxMessagesPerStream ?? DEFAULT_MAX_MESSAGES_PER_STREAM;
   const dueForComment =
     details.isReallyLive &&
-    state.messagesSent < MAX_MESSAGES_PER_STREAM &&
+    state.commentingEnabled !== false &&
+    state.messagesSent < maxMessages &&
     Date.now() - state.lastCommentAt >= COMMENT_INTERVAL_MS;
 
   if (dueForComment) {
@@ -372,7 +388,7 @@ async function tick(state, ownChannelId) {
         log('⚠️ falha ao postar comentário periódico, tenta só no próximo intervalo:', err.message);
         return { ...state, lastCommentAt: Date.now() };
       }
-      log(`💬 comentário postado (${state.messagesSent + 1}/${MAX_MESSAGES_PER_STREAM}): ${msg}`);
+      log(`💬 comentário postado (${state.messagesSent + 1}/${maxMessages}): ${msg}`);
       return {
         ...state,
         messagesSent: state.messagesSent + 1,
@@ -413,6 +429,11 @@ async function main() {
       stateBox.current = { ...stateBox.current, enabledWeekdays: days };
       saveState(stateBox.current);
       log(`🖥️ dias de entrada na live definidos via UI: [${days.join(', ')}]`);
+    },
+    setCommentSettings: ({ enabled, max }) => {
+      stateBox.current = { ...stateBox.current, commentingEnabled: enabled, maxMessagesPerStream: max };
+      saveState(stateBox.current);
+      log(`🖥️ comentários periódicos via UI: ${enabled ? 'ligado' : 'desligado'}, máximo de ${max} mensagens por live`);
     },
     testMessage: ({ greeting, title, chatContext }) =>
       generateMessage(greeting, stateBox.current.history, { title, chatContext }),
