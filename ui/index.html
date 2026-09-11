@@ -161,6 +161,38 @@
     </div>
 
     <div class="panel">
+      <h2>Exceção de horário num dia específico</h2>
+      <p class="sub" style="margin-top:-6px">
+        Pra quando a live de um dia específico sai do horário de costume, sem precisar mudar
+        o horário permitido de forma permanente. Escolha o dia e o horário (também em
+        <strong>horário de Brasília</strong>). Some sozinha depois que esse dia passa — não
+        precisa lembrar de limpar.
+      </p>
+      <div class="row">
+        <label for="exception-date">Dia (data de Brasília)</label>
+        <input id="exception-date" type="date" style="max-width:180px" />
+      </div>
+      <div class="row" style="display:flex; gap:12px;">
+        <div style="flex:1">
+          <label for="exception-start">Início (Brasília)</label>
+          <input id="exception-start" type="time" />
+        </div>
+        <div style="flex:1">
+          <label for="exception-end">Fim (Brasília)</label>
+          <input id="exception-end" type="time" />
+        </div>
+      </div>
+      <div class="btnrow" style="margin-top:8px">
+        <button id="set-exception-btn">Salvar exceção</button>
+        <button id="clear-exception-btn" class="secondary">Limpar</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <span class="badge" id="badge-exception"></span>
+      </div>
+      <div id="exception-msg" class="msg"></div>
+    </div>
+
+    <div class="panel">
       <h2>Comentários durante a live</h2>
       <p class="sub" style="margin-top:-6px">
         A saudação de entrada sempre é postada. Isso aqui controla só os comentários periódicos
@@ -391,8 +423,35 @@
       windowStartEl.value = win.start;
       windowEndEl.value = win.end;
     }
+    const exceptionDateEl = document.getElementById('exception-date');
+    const exceptionStartEl = document.getElementById('exception-start');
+    const exceptionEndEl = document.getElementById('exception-end');
+    if (document.activeElement !== exceptionDateEl && document.activeElement !== exceptionStartEl && document.activeElement !== exceptionEndEl) {
+      exceptionDateEl.value = state.liveWindowException?.date || hojeEmBrasilia();
+      exceptionStartEl.value = state.liveWindowException?.start || '';
+      exceptionEndEl.value = state.liveWindowException?.end || '';
+    }
+    const badgeException = document.getElementById('badge-exception');
+    const hoje = hojeEmBrasilia();
+    if (!state.liveWindowException) {
+      badgeException.className = 'badge off';
+      badgeException.textContent = 'sem exceção — vale só o horário permitido de sempre';
+    } else if (state.liveWindowException.date < hoje) {
+      badgeException.className = 'badge off';
+      badgeException.textContent = `exceção expirada (era pra ${state.liveWindowException.date}) — some sozinha, sem efeito`;
+    } else if (state.liveWindowException.date === hoje) {
+      badgeException.className = 'badge on';
+      badgeException.textContent = `exceção ativa hoje: ${state.liveWindowException.start}–${state.liveWindowException.end} (Brasília)`;
+    } else {
+      badgeException.className = 'badge on';
+      badgeException.textContent = `exceção agendada pra ${state.liveWindowException.date}: ${state.liveWindowException.start}–${state.liveWindowException.end} (Brasília)`;
+    }
     const list = document.getElementById('history-list');
     list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
+  }
+
+  function hojeEmBrasilia() {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
   }
 
   function escapeHtml(s) {
@@ -433,6 +492,42 @@
   document.getElementById('window-enabled').addEventListener('change', saveWindow);
   document.getElementById('window-start').addEventListener('change', saveWindow);
   document.getElementById('window-end').addEventListener('change', saveWindow);
+
+  document.getElementById('set-exception-btn').addEventListener('click', async () => {
+    const date = document.getElementById('exception-date').value;
+    const start = document.getElementById('exception-start').value;
+    const end = document.getElementById('exception-end').value;
+    const msgEl = document.getElementById('exception-msg');
+    if (!date || !start || !end) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'preencha dia, início e fim';
+      return;
+    }
+    try {
+      await api('/api/live-window-exception', { method: 'POST', body: JSON.stringify({ date, start, end }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'salvo — vale só nesse dia.';
+      refreshStatus();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    }
+  });
+
+  document.getElementById('clear-exception-btn').addEventListener('click', async () => {
+    document.getElementById('exception-start').value = '';
+    document.getElementById('exception-end').value = '';
+    const msgEl = document.getElementById('exception-msg');
+    try {
+      await api('/api/live-window-exception', { method: 'POST', body: JSON.stringify({ start: '', end: '' }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'limpo.';
+      refreshStatus();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    }
+  });
 
   document.getElementById('set-forced-btn').addEventListener('click', async () => {
     const text = document.getElementById('forced-text').value;

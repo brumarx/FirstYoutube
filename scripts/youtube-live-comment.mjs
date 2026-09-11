@@ -92,20 +92,41 @@ function horaAtualEmBrasilia() {
   }).format(new Date());
 }
 
+// "YYYY-MM-DD" de hoje em horário de Brasília — usado pra marcar validade da
+// exceção esporádica (ver liveWindowException) e ela sozinha deixar de valer
+// quando o dia virar, sem precisar limpar manualmente.
+function dataDeHojeEmBrasilia() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+}
+
 function minutosDoDia(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
 }
 
-// Janela pode cruzar a meia-noite (ex: 20:00–02:00) — nesse caso o horário atual
-// está dentro se for >= início OU <= fim, em vez do "entre os dois" de uma janela normal.
-function dentroDaJanelaDeHorario(window) {
-  if (!window?.enabled) return true;
+// Faixa pode cruzar a meia-noite (ex: 20:00–02:00) — nesse caso o horário atual
+// está dentro se for >= início OU <= fim, em vez do "entre os dois" de uma faixa normal.
+function horarioDentroDaFaixa(start, end) {
   const agora = minutosDoDia(horaAtualEmBrasilia());
-  const inicio = minutosDoDia(window.start);
-  const fim = minutosDoDia(window.end);
+  const inicio = minutosDoDia(start);
+  const fim = minutosDoDia(end);
   if (inicio <= fim) return agora >= inicio && agora <= fim;
   return agora >= inicio || agora <= fim;
+}
+
+// Além da janela fixa (liveWindow), aceita uma exceção esporádica válida só pro
+// dia em que foi criada (liveWindowException.date) — pra quando a live de um dia
+// específico sai fora do horário de costume, sem precisar mudar a janela padrão.
+// Exceção de dia anterior é ignorada sozinha (não precisa limpar na mão).
+function dentroDaJanelaDeHorario(state) {
+  const window = state.liveWindow ?? DEFAULT_LIVE_WINDOW;
+  if (!window.enabled) return true;
+  if (horarioDentroDaFaixa(window.start, window.end)) return true;
+  const exception = state.liveWindowException;
+  if (exception && exception.date === dataDeHojeEmBrasilia()) {
+    return horarioDentroDaFaixa(exception.start, exception.end);
+  }
+  return false;
 }
 
 // Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
@@ -153,6 +174,7 @@ function loadState() {
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
       liveWindow: DEFAULT_LIVE_WINDOW,
+      liveWindowException: null,
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -175,6 +197,7 @@ function loadState() {
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
       liveWindow: DEFAULT_LIVE_WINDOW,
+      liveWindowException: null,
     };
   }
 }
@@ -241,7 +264,7 @@ async function tick(state, ownChannelId) {
       if (!enabledWeekdays.includes(diaDaSemanaEmSesimbra())) return state;
       // fora da janela de horário (horário de Brasília) marcada na UI → também nem
       // varre o canal, mesma lógica de economia de cota do check de dia da semana.
-      if (!dentroDaJanelaDeHorario(state.liveWindow ?? DEFAULT_LIVE_WINDOW)) return state;
+      if (!dentroDaJanelaDeHorario(state)) return state;
       liveVideoId = await checkChannelLive(HANDLE);
       if (!liveVideoId) return state;
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
@@ -327,6 +350,7 @@ async function tick(state, ownChannelId) {
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
       liveWindow: state.liveWindow,
+      liveWindowException: state.liveWindowException,
     };
   }
 
@@ -350,6 +374,7 @@ async function tick(state, ownChannelId) {
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
       liveWindow: state.liveWindow,
+      liveWindowException: state.liveWindowException,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -400,6 +425,7 @@ async function tick(state, ownChannelId) {
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
       liveWindow: state.liveWindow,
+      liveWindowException: state.liveWindowException,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -482,6 +508,18 @@ async function main() {
         enabled
           ? `🖥️ janela de horário (Brasília) via UI: ${start}–${end}`
           : '🖥️ janela de horário via UI: desabilitada (sem restrição)',
+      );
+    },
+    setLiveWindowException: (exception) => {
+      stateBox.current = {
+        ...stateBox.current,
+        liveWindowException: exception ? { date: exception.date, start: exception.start, end: exception.end } : null,
+      };
+      saveState(stateBox.current);
+      log(
+        exception
+          ? `🖥️ exceção de horário via UI, válida só em ${exception.date}: ${exception.start}–${exception.end}`
+          : '🖥️ exceção de horário via UI limpa',
       );
     },
     testMessage: ({ greeting, title, chatContext }) =>
