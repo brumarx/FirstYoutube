@@ -136,6 +136,31 @@
     </div>
 
     <div class="panel">
+      <h2>Horário permitido</h2>
+      <p class="sub" style="margin-top:-6px">
+        O canal costuma fazer mais de uma live por dia e o horário muda. Digite a janela em
+        <strong>horário de Brasília</strong> (é como as lives são anunciadas) — o bot converte
+        sozinho pro fuso de Sesimbra. Fora da janela, o bot nem varre o canal atrás de live nova.
+      </p>
+      <div class="checkrow">
+        <input type="checkbox" id="window-enabled" />
+        <label for="window-enabled">Restringir horário de entrada</label>
+      </div>
+      <div class="row" style="display:flex; gap:12px;">
+        <div style="flex:1">
+          <label for="window-start">Início (Brasília)</label>
+          <input id="window-start" type="time" />
+        </div>
+        <div style="flex:1">
+          <label for="window-end">Fim (Brasília)</label>
+          <input id="window-end" type="time" />
+        </div>
+      </div>
+      <small class="hint">Se o fim for menor que o início, a janela cruza a meia-noite (ex: 20:00–02:00).</small>
+      <div id="window-msg" class="msg"></div>
+    </div>
+
+    <div class="panel">
       <h2>Comentários durante a live</h2>
       <p class="sub" style="margin-top:-6px">
         A saudação de entrada sempre é postada. Isso aqui controla só os comentários periódicos
@@ -201,6 +226,7 @@
   const DAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
   let savingWeekdays = false;
   let savingCommentSettings = false;
+  let savingWindow = false;
 
   function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
   function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
@@ -282,6 +308,33 @@
     }
   }
 
+  async function saveWindow() {
+    const enabled = document.getElementById('window-enabled').checked;
+    const start = document.getElementById('window-start').value;
+    const end = document.getElementById('window-end').value;
+    const msgEl = document.getElementById('window-msg');
+    if (enabled && (!start || !end)) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'preencha início e fim para restringir o horário';
+      return;
+    }
+    savingWindow = true;
+    try {
+      await api('/api/live-window', {
+        method: 'POST',
+        body: JSON.stringify({ enabled, start: start || '00:00', end: end || '23:59' }),
+      });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = 'salvo.';
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    } finally {
+      savingWindow = false;
+      refreshStatus();
+    }
+  }
+
   function fmtDate(ms) {
     if (!ms) return '—';
     return new Date(ms).toLocaleString('pt-BR');
@@ -330,6 +383,14 @@
       document.getElementById('commenting-enabled').checked = state.commentingEnabled !== false;
       maxMessagesEl.value = state.maxMessagesPerStream ?? 4;
     }
+    const windowStartEl = document.getElementById('window-start');
+    const windowEndEl = document.getElementById('window-end');
+    if (!savingWindow && document.activeElement !== windowStartEl && document.activeElement !== windowEndEl) {
+      const win = state.liveWindow ?? { enabled: false, start: '00:00', end: '23:59' };
+      document.getElementById('window-enabled').checked = win.enabled;
+      windowStartEl.value = win.start;
+      windowEndEl.value = win.end;
+    }
     const list = document.getElementById('history-list');
     list.innerHTML = (state.history || []).slice().reverse().map((m) => `<li>${escapeHtml(m)}</li>`).join('') || '<li>(nenhuma ainda)</li>';
   }
@@ -368,6 +429,10 @@
 
   document.getElementById('commenting-enabled').addEventListener('change', saveCommentSettings);
   document.getElementById('max-messages').addEventListener('change', saveCommentSettings);
+
+  document.getElementById('window-enabled').addEventListener('change', saveWindow);
+  document.getElementById('window-start').addEventListener('change', saveWindow);
+  document.getElementById('window-end').addEventListener('change', saveWindow);
 
   document.getElementById('set-forced-btn').addEventListener('click', async () => {
     const text = document.getElementById('forced-text').value;

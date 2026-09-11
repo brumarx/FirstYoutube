@@ -70,10 +70,42 @@ const MAX_CHAT_CONTEXT = 10;
 // Dias da semana (0=domingo .. 6=sábado) em que o bot pode entrar numa live nova.
 // Controlável pela UI (ver ui/index.html) — todos habilitados por padrão.
 const DEFAULT_ENABLED_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6];
+// Janela de horário em que o bot pode entrar numa live nova — o canal faz mais de
+// uma live por dia e o horário delas muda (ver ui/index.html). Digitado em horário
+// de Brasília (é como o horário das lives é anunciado) e convertido internamente
+// pro instante atual — sem precisar a pessoa fazer conta de fuso Brasil↔Sesimbra
+// (que muda com o horário de verão europeu). Desabilitada por padrão (sem limite).
+const DEFAULT_LIVE_WINDOW = { enabled: false, start: '00:00', end: '23:59' };
 
 function diaDaSemanaEmSesimbra() {
   const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Lisbon', weekday: 'short' }).format(new Date());
   return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[weekday];
+}
+
+// "HH:MM" atual em horário de Brasília (America/Sao_Paulo).
+function horaAtualEmBrasilia() {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/Sao_Paulo',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date());
+}
+
+function minutosDoDia(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number);
+  return h * 60 + m;
+}
+
+// Janela pode cruzar a meia-noite (ex: 20:00–02:00) — nesse caso o horário atual
+// está dentro se for >= início OU <= fim, em vez do "entre os dois" de uma janela normal.
+function dentroDaJanelaDeHorario(window) {
+  if (!window?.enabled) return true;
+  const agora = minutosDoDia(horaAtualEmBrasilia());
+  const inicio = minutosDoDia(window.start);
+  const fim = minutosDoDia(window.end);
+  if (inicio <= fim) return agora >= inicio && agora <= fim;
+  return agora >= inicio || agora <= fim;
 }
 
 // Saudação natural, sem alegar ser "o primeiro" a comentar (isso irritava outros
@@ -120,6 +152,7 @@ function loadState() {
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
+      liveWindow: DEFAULT_LIVE_WINDOW,
       ...JSON.parse(readFileSync(STATE_FILE, 'utf8')),
     };
   } catch {
@@ -141,6 +174,7 @@ function loadState() {
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
+      liveWindow: DEFAULT_LIVE_WINDOW,
     };
   }
 }
@@ -205,6 +239,9 @@ async function tick(state, ownChannelId) {
       // e evita entrar numa live num dia que a pessoa marcou que não vai estar).
       const enabledWeekdays = state.enabledWeekdays ?? DEFAULT_ENABLED_WEEKDAYS;
       if (!enabledWeekdays.includes(diaDaSemanaEmSesimbra())) return state;
+      // fora da janela de horário (horário de Brasília) marcada na UI → também nem
+      // varre o canal, mesma lógica de economia de cota do check de dia da semana.
+      if (!dentroDaJanelaDeHorario(state.liveWindow ?? DEFAULT_LIVE_WINDOW)) return state;
       liveVideoId = await checkChannelLive(HANDLE);
       if (!liveVideoId) return state;
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
@@ -289,6 +326,7 @@ async function tick(state, ownChannelId) {
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
+      liveWindow: state.liveWindow,
     };
   }
 
@@ -311,6 +349,7 @@ async function tick(state, ownChannelId) {
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
+      liveWindow: state.liveWindow,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -360,6 +399,7 @@ async function tick(state, ownChannelId) {
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
+      liveWindow: state.liveWindow,
       history: state.history,
       chatPageToken: null,
       recentChat: [],
@@ -434,6 +474,15 @@ async function main() {
       stateBox.current = { ...stateBox.current, commentingEnabled: enabled, maxMessagesPerStream: max };
       saveState(stateBox.current);
       log(`🖥️ comentários periódicos via UI: ${enabled ? 'ligado' : 'desligado'}, máximo de ${max} mensagens por live`);
+    },
+    setLiveWindow: ({ enabled, start, end }) => {
+      stateBox.current = { ...stateBox.current, liveWindow: { enabled, start, end } };
+      saveState(stateBox.current);
+      log(
+        enabled
+          ? `🖥️ janela de horário (Brasília) via UI: ${start}–${end}`
+          : '🖥️ janela de horário via UI: desabilitada (sem restrição)',
+      );
     },
     testMessage: ({ greeting, title, chatContext }) =>
       generateMessage(greeting, stateBox.current.history, { title, chatContext }),
