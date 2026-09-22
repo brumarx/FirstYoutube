@@ -82,21 +82,21 @@ function diaDaSemanaEmSesimbra() {
   return { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 }[weekday];
 }
 
-// "HH:MM" atual em horário de Brasília (America/Sao_Paulo).
-function horaAtualEmBrasilia() {
+// "HH:MM" do instante `quando` (padrão: agora) em horário de Brasília (America/Sao_Paulo).
+function horaEmBrasilia(quando = new Date()) {
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: 'America/Sao_Paulo',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  }).format(new Date());
+  }).format(quando);
 }
 
 // "YYYY-MM-DD" de hoje em horário de Brasília — usado pra marcar validade da
 // exceção esporádica (ver liveWindowException) e ela sozinha deixar de valer
 // quando o dia virar, sem precisar limpar manualmente.
-function dataDeHojeEmBrasilia() {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+function dataEmBrasilia(quando = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(quando);
 }
 
 function minutosDoDia(hhmm) {
@@ -106,8 +106,8 @@ function minutosDoDia(hhmm) {
 
 // Faixa pode cruzar a meia-noite (ex: 20:00–02:00) — nesse caso o horário atual
 // está dentro se for >= início OU <= fim, em vez do "entre os dois" de uma faixa normal.
-function horarioDentroDaFaixa(start, end) {
-  const agora = minutosDoDia(horaAtualEmBrasilia());
+function horarioDentroDaFaixa(start, end, quando) {
+  const agora = minutosDoDia(horaEmBrasilia(quando));
   const inicio = minutosDoDia(start);
   const fim = minutosDoDia(end);
   if (inicio <= fim) return agora >= inicio && agora <= fim;
@@ -118,13 +118,16 @@ function horarioDentroDaFaixa(start, end) {
 // dia em que foi criada (liveWindowException.date) — pra quando a live de um dia
 // específico sai fora do horário de costume, sem precisar mudar a janela padrão.
 // Exceção de dia anterior é ignorada sozinha (não precisa limpar na mão).
-function dentroDaJanelaDeHorario(state) {
+// `quando` é o instante a checar — o horário AGENDADO da live, não a hora atual
+// (ver tick): a sala de espera abre antes do horário e é ali que a corrida pelo
+// primeiro comentário acontece.
+function dentroDaJanelaDeHorario(state, quando = new Date()) {
   const window = state.liveWindow ?? DEFAULT_LIVE_WINDOW;
   if (!window.enabled) return true;
-  if (horarioDentroDaFaixa(window.start, window.end)) return true;
+  if (horarioDentroDaFaixa(window.start, window.end, quando)) return true;
   const exception = state.liveWindowException;
-  if (exception && exception.date === dataDeHojeEmBrasilia()) {
-    return horarioDentroDaFaixa(exception.start, exception.end);
+  if (exception && exception.date === dataEmBrasilia(quando)) {
+    return horarioDentroDaFaixa(exception.start, exception.end, quando);
   }
   return false;
 }
@@ -244,6 +247,10 @@ async function generateMessage(isGreeting, history = [], extra = {}) {
   return opcoes[Math.floor(Math.random() * opcoes.length)];
 }
 
+// Última live achada que está agendada fora da janela de horário — só em memória,
+// pra não chamar a API (cota) nessa mesma live a cada varredura enquanto ela durar.
+let lastOutOfWindowVideoId = null;
+
 async function tick(state, ownChannelId) {
   if (!state.videoId) {
     // depois de uma tentativa falhada, espera o backoff — martelar a cada 30s é
@@ -262,13 +269,17 @@ async function tick(state, ownChannelId) {
       // e evita entrar numa live num dia que a pessoa marcou que não vai estar).
       const enabledWeekdays = state.enabledWeekdays ?? DEFAULT_ENABLED_WEEKDAYS;
       if (!enabledWeekdays.includes(diaDaSemanaEmSesimbra())) return state;
-      // fora da janela de horário (horário de Brasília) marcada na UI → também nem
-      // varre o canal, mesma lógica de economia de cota do check de dia da semana.
-      if (!dentroDaJanelaDeHorario(state)) return state;
+      // A janela de horário NÃO é checada aqui contra a hora atual: a sala de espera
+      // (chat já aberto) abre antes do horário agendado, e é ali que a torcida corre
+      // pra comentar primeiro — travar a varredura até a janela abrir fazia o bot só
+      // chegar quando o chat já estava cheio. Varrer é scraping (sem custo de cota);
+      // a janela é aplicada abaixo, contra o horário AGENDADO da live.
       liveVideoId = await checkChannelLive(HANDLE);
       if (!liveVideoId) return state;
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
       if (liveVideoId === state.attendedVideoId) return state;
+      // já vimos que essa live está agendada fora da janela — não gasta cota de novo
+      if (lastOutOfWindowVideoId === liveVideoId) return state;
     }
 
     const accessToken = await getAccessToken();
@@ -276,6 +287,17 @@ async function tick(state, ownChannelId) {
     if (!details) {
       // vídeo sumiu (ex: live cancelada) — esquece esse candidato e volta a varrer o canal
       return { ...state, preShowVideoId: null, pendingGreeting: null, preShowScheduledStartTime: null };
+    }
+    // janela de horário (Brasília) marcada na UI, checada contra o horário agendado
+    // da live (sem agendamento, contra a hora atual). Só pra candidato novo — um
+    // candidato de pré-show já passou por esse filtro quando foi achado.
+    if (!state.preShowVideoId) {
+      const horarioDaLive = details.scheduledStartTime ? new Date(details.scheduledStartTime) : new Date();
+      if (!dentroDaJanelaDeHorario(state, horarioDaLive)) {
+        lastOutOfWindowVideoId = liveVideoId;
+        log(`🕒 ${liveVideoId} agendada pra ${horaEmBrasilia(horarioDaLive)} (Brasília), fora da janela — não entra`);
+        return state;
+      }
     }
     if (!details.activeLiveChatId) {
       // live já terminou (actualEndTime existe) sem a gente conseguir postar — chat
@@ -503,6 +525,7 @@ async function main() {
     },
     setLiveWindow: ({ enabled, start, end }) => {
       stateBox.current = { ...stateBox.current, liveWindow: { enabled, start, end } };
+      lastOutOfWindowVideoId = null; // janela mudou → reavalia a live atual
       saveState(stateBox.current);
       log(
         enabled
@@ -511,6 +534,7 @@ async function main() {
       );
     },
     setLiveWindowException: (exception) => {
+      lastOutOfWindowVideoId = null; // janela mudou → reavalia a live atual
       stateBox.current = {
         ...stateBox.current,
         liveWindowException: exception ? { date: exception.date, start: exception.start, end: exception.end } : null,
