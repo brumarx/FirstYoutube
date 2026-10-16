@@ -214,10 +214,14 @@
       <h2>Saudação forçada (próxima live)</h2>
       <p class="sub" style="margin-top:-6px">
         Define o texto EXATO que o bot vai postar na próxima saudação, sem passar pela IA.
-        Some sozinho depois de usado uma vez.
+        Some sozinho depois de usado uma vez, a não ser que esteja marcado como padrão.
       </p>
       <div class="row">
         <textarea id="forced-text" placeholder="ex: Professor Pardal a Revanche...burro pra kct"></textarea>
+      </div>
+      <div class="checkrow">
+        <input type="checkbox" id="forced-persistent" />
+        <label for="forced-persistent">Manter como padrão (usa em toda live, não some depois de usada)</label>
       </div>
       <div class="btnrow">
         <button id="set-forced-btn">Definir</button>
@@ -257,6 +261,7 @@
   const TOKEN_KEY = 'sv-control-token';
   const DAY_LABELS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
   let savingWeekdays = false;
+  let savingForcedPersistent = false;
   let savingCommentSettings = false;
   let savingWindow = false;
 
@@ -392,7 +397,7 @@
     const badge = document.getElementById('badge-forced');
     if (state.forcedGreetingText) {
       badge.className = 'badge on';
-      badge.textContent = 'saudação forçada ativa: "' + state.forcedGreetingText + '"';
+      badge.textContent = (state.forcedGreetingPersistent ? 'saudação forçada padrão: "' : 'saudação forçada ativa: "') + state.forcedGreetingText + '"';
     } else {
       badge.className = 'badge off';
       badge.textContent = 'sem saudação forçada — próxima live usa IA normalmente';
@@ -403,6 +408,9 @@
     const forcedTextEl = document.getElementById('forced-text');
     if (document.activeElement !== forcedTextEl) {
       forcedTextEl.value = state.forcedGreetingText || '';
+    }
+    if (!savingForcedPersistent) {
+      document.getElementById('forced-persistent').checked = Boolean(state.forcedGreetingPersistent);
     }
     if (!savingWeekdays) {
       const enabled = new Set(state.enabledWeekdays ?? [0, 1, 2, 3, 4, 5, 6]);
@@ -540,6 +548,22 @@
     } catch (err) {
       msgEl.className = 'msg err';
       msgEl.textContent = 'falhou: ' + err.message;
+    }
+  });
+
+  document.getElementById('forced-persistent').addEventListener('change', async (ev) => {
+    const msgEl = document.getElementById('forced-msg');
+    savingForcedPersistent = true;
+    try {
+      await api('/api/forced-greeting-persistent', { method: 'POST', body: JSON.stringify({ persistent: ev.target.checked }) });
+      msgEl.className = 'msg ok';
+      msgEl.textContent = ev.target.checked ? 'marcada como padrão.' : 'vale só pra próxima live.';
+      refreshStatus();
+    } catch (err) {
+      msgEl.className = 'msg err';
+      msgEl.textContent = 'falhou: ' + err.message;
+    } finally {
+      savingForcedPersistent = false;
     }
   });
 

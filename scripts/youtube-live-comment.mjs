@@ -173,6 +173,7 @@ function loadState() {
       chatPageToken: null,
       recentChat: [],
       forcedGreetingText: null,
+      forcedGreetingPersistent: false,
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
@@ -196,6 +197,7 @@ function loadState() {
       chatPageToken: null,
       recentChat: [],
       forcedGreetingText: null,
+      forcedGreetingPersistent: false,
       enabledWeekdays: DEFAULT_ENABLED_WEEKDAYS,
       commentingEnabled: DEFAULT_COMMENTING_ENABLED,
       maxMessagesPerStream: DEFAULT_MAX_MESSAGES_PER_STREAM,
@@ -248,8 +250,17 @@ async function generateMessage(isGreeting, history = [], extra = {}) {
 }
 
 // Última live achada que está agendada fora da janela de horário — só em memória,
-// pra não chamar a API (cota) nessa mesma live a cada varredura enquanto ela durar.
-let lastOutOfWindowVideoId = null;
+// pra não chamar a API (cota) nessa mesma live a cada varredura de 10s. Reavaliada
+// em `recheckAt`: o canal às vezes reagenda a live (ex: de 09:15 pra 11:05) e sem
+// isso o bot nunca notava que ela tinha entrado na janela.
+let skippedCandidate = null; // { videoId, recheckAt }
+const SKIPPED_CANDIDATE_RECHECK_MS = 10 * 60_000;
+
+function skipCandidate(videoId) {
+  const jaAvisado = skippedCandidate?.videoId === videoId;
+  skippedCandidate = { videoId, recheckAt: Date.now() + SKIPPED_CANDIDATE_RECHECK_MS };
+  return jaAvisado;
+}
 
 async function tick(state, ownChannelId) {
   if (!state.videoId) {
@@ -279,7 +290,7 @@ async function tick(state, ownChannelId) {
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
       if (liveVideoId === state.attendedVideoId) return state;
       // já vimos que essa live está agendada fora da janela — não gasta cota de novo
-      if (lastOutOfWindowVideoId === liveVideoId) return state;
+      if (skippedCandidate?.videoId === liveVideoId && Date.now() < skippedCandidate.recheckAt) return state;
     }
 
     const accessToken = await getAccessToken();
@@ -294,8 +305,7 @@ async function tick(state, ownChannelId) {
     if (!state.preShowVideoId) {
       const horarioDaLive = details.scheduledStartTime ? new Date(details.scheduledStartTime) : new Date();
       if (!dentroDaJanelaDeHorario(state, horarioDaLive)) {
-        lastOutOfWindowVideoId = liveVideoId;
-        log(`🕒 ${liveVideoId} agendada pra ${horaEmBrasilia(horarioDaLive)} (Brasília), fora da janela — não entra`);
+        if (!skipCandidate(liveVideoId)) log(`🕒 ${liveVideoId} agendada pra ${horaEmBrasilia(horarioDaLive)} (Brasília), fora da janela — não entra`);
         return state;
       }
     }
@@ -348,6 +358,21 @@ async function tick(state, ownChannelId) {
       };
     }
     log(`✅ saudação postada: ${msg}`);
+    // registra em que posição a saudação ficou no chat — sem isso não dá pra saber
+    // depois (chat encerrado não é mais legível pela API) se o bot chegou primeiro.
+    if (ownChannelId) {
+      try {
+        const { items } = await fetchLiveChatMessages(details.activeLiveChatId, accessToken, null);
+        const posicao = items.findIndex((m) => m.channelId === ownChannelId);
+        log(
+          posicao >= 0
+            ? `🏁 saudação ficou em ${posicao + 1}º no chat (${posicao} mensage${posicao === 1 ? 'm' : 'ns'} antes)`
+            : `🏁 saudação ainda não aparece no chat (${items.length} mensagens lá)`,
+        );
+      } catch (err) {
+        log('⚠️ não consegui ler o chat pra ver a posição da saudação:', err.message);
+      }
+    }
 
     return {
       videoId: liveVideoId,
@@ -366,8 +391,10 @@ async function tick(state, ownChannelId) {
       history: pushHistory(state.history, msg),
       chatPageToken: null,
       recentChat: [],
-      // só vale pra UMA saudação (a próxima live) — some sozinho depois de usada.
-      forcedGreetingText: null,
+      // por padrão só vale pra UMA saudação (a próxima live) e some sozinho depois
+      // de usada — a não ser que tenha sido marcada como padrão na UI.
+      forcedGreetingText: state.forcedGreetingPersistent ? state.forcedGreetingText : null,
+      forcedGreetingPersistent: state.forcedGreetingPersistent,
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
@@ -392,6 +419,7 @@ async function tick(state, ownChannelId) {
       preShowVideoId: null,
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
+      forcedGreetingPersistent: state.forcedGreetingPersistent,
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
@@ -443,6 +471,7 @@ async function tick(state, ownChannelId) {
       preShowVideoId: null,
       pendingGreeting: null,
       forcedGreetingText: state.forcedGreetingText,
+      forcedGreetingPersistent: state.forcedGreetingPersistent,
       enabledWeekdays: state.enabledWeekdays,
       commentingEnabled: state.commentingEnabled,
       maxMessagesPerStream: state.maxMessagesPerStream,
@@ -495,6 +524,15 @@ async function main() {
   // conseguir ler o estado atual e aplicar mudanças (ex: saudação forçada) entre
   // um ciclo e outro do loop principal.
   const stateBox = { current: loadState() };
+  // Mudanças feitas pela UI enquanto um `tick` está em andamento: o tick trabalha
+  // numa cópia do state tirada no começo do ciclo, então sem reaplicar isso no fim
+  // o resultado dele sobrescrevia (e perdia) o que a pessoa acabou de salvar na UI.
+  let uiPatchDuringTick = {};
+  const applyUiPatch = (patch) => {
+    stateBox.current = { ...stateBox.current, ...patch };
+    Object.assign(uiPatchDuringTick, patch);
+    saveState(stateBox.current);
+  };
   // buscado uma vez só (não muda durante a execução) — usado pra filtrar as
   // próprias mensagens fora do contexto de chat passado pro LLM.
   const ownChannelId = await getOwnChannelId(await getAccessToken()).catch((err) => {
@@ -509,24 +547,24 @@ async function main() {
     log,
     getState: () => stateBox.current,
     setForcedGreeting: (text) => {
-      stateBox.current = { ...stateBox.current, forcedGreetingText: text };
-      saveState(stateBox.current);
+      applyUiPatch({ forcedGreetingText: text });
       log(text ? `🖥️ saudação forçada definida via UI: "${text}"` : '🖥️ saudação forçada limpa via UI');
     },
+    setForcedGreetingPersistent: (persistent) => {
+      applyUiPatch({ forcedGreetingPersistent: persistent });
+      log(persistent ? '🖥️ saudação forçada marcada como padrão via UI (vale pra toda live)' : '🖥️ saudação forçada volta a valer só pra próxima live');
+    },
     setEnabledWeekdays: (days) => {
-      stateBox.current = { ...stateBox.current, enabledWeekdays: days };
-      saveState(stateBox.current);
+      applyUiPatch({ enabledWeekdays: days });
       log(`🖥️ dias de entrada na live definidos via UI: [${days.join(', ')}]`);
     },
     setCommentSettings: ({ enabled, max }) => {
-      stateBox.current = { ...stateBox.current, commentingEnabled: enabled, maxMessagesPerStream: max };
-      saveState(stateBox.current);
+      applyUiPatch({ commentingEnabled: enabled, maxMessagesPerStream: max });
       log(`🖥️ comentários periódicos via UI: ${enabled ? 'ligado' : 'desligado'}, máximo de ${max} mensagens por live`);
     },
     setLiveWindow: ({ enabled, start, end }) => {
-      stateBox.current = { ...stateBox.current, liveWindow: { enabled, start, end } };
-      lastOutOfWindowVideoId = null; // janela mudou → reavalia a live atual
-      saveState(stateBox.current);
+      skippedCandidate = null; // janela mudou → reavalia a live atual
+      applyUiPatch({ liveWindow: { enabled, start, end } });
       log(
         enabled
           ? `🖥️ janela de horário (Brasília) via UI: ${start}–${end}`
@@ -534,12 +572,10 @@ async function main() {
       );
     },
     setLiveWindowException: (exception) => {
-      lastOutOfWindowVideoId = null; // janela mudou → reavalia a live atual
-      stateBox.current = {
-        ...stateBox.current,
+      skippedCandidate = null; // janela mudou → reavalia a live atual
+      applyUiPatch({
         liveWindowException: exception ? { date: exception.date, start: exception.start, end: exception.end } : null,
-      };
-      saveState(stateBox.current);
+      });
       log(
         exception
           ? `🖥️ exceção de horário via UI, válida só em ${exception.date}: ${exception.start}–${exception.end}`
@@ -552,7 +588,9 @@ async function main() {
 
   for (;;) {
     try {
-      stateBox.current = await tick(stateBox.current, ownChannelId);
+      uiPatchDuringTick = {};
+      const next = await tick(stateBox.current, ownChannelId);
+      stateBox.current = { ...next, ...uiPatchDuringTick };
       saveState(stateBox.current);
     } catch (err) {
       log('❌ erro no ciclo:', err.message);
