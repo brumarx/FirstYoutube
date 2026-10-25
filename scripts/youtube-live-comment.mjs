@@ -30,11 +30,13 @@ const UI_HTML_PATH = path.join(ROOT, 'ui', 'index.html');
 const CONTROL_PORT = Number(process.env.CONTROL_UI_PORT) || 8787;
 
 const HANDLE = '@SetorVisitante';
-const POLL_INTERVAL_MS = 10_000; // varre o canal atrás de uma NOVA live (scraping, sem custo de cota)
+// Varre o canal atrás de uma NOVA live (scraping, sem custo de cota). Com 10s a
+// torcida que recebe a notificação já chegava no chat antes da gente.
+const POLL_INTERVAL_MS = 5_000;
 // Depois que já sabemos qual vídeo vai ficar ao vivo (pré-show), poll rápido só
 // nesse vídeo via API — é o que decide se o bot chega no "pódio" (entre os 5
 // primeiros comentários) ou perde pra quem já está com o dedo no gatilho no chat.
-const PRESHOW_POLL_INTERVAL_MS = 5_000;
+const PRESHOW_POLL_INTERVAL_MS = 3_000;
 // Enquanto o candidato de pré-show ainda está longe do horário agendado, poll bem
 // mais devagar — sem isso o bot fica batendo na API a cada 5s por HORAS (a sala de
 // espera abre bem antes do horário real) e estoura a cota diária da API do YouTube
@@ -43,6 +45,10 @@ const PRESHOW_POLL_INTERVAL_MS = 5_000;
 // perto do horário agendado (ver PRESHOW_NEAR_WINDOW_MS).
 const PRESHOW_FAR_POLL_INTERVAL_MS = 30_000;
 const PRESHOW_NEAR_WINDOW_MS = 10 * 60_000;
+// Logo depois que a live aparece no canal o chat costuma abrir em segundos — mesmo
+// que ela esteja agendada pra bem mais tarde. Nesse começo poll rápido também,
+// senão o bot esperava os 30s do poll "longe do horário" e perdia o pódio.
+const PRESHOW_JUST_FOUND_MS = 2 * 60_000;
 // Enquanto já estamos dentro da live (depois da saudação), cada ciclo custa cota
 // (status do vídeo + leitura do chat) sem ganhar nada em "chegar primeiro" — isso
 // já foi decidido. Poll mais devagar aqui não perde a corrida, só economiza cota
@@ -249,18 +255,30 @@ async function generateMessage(isGreeting, history = [], extra = {}) {
   return opcoes[Math.floor(Math.random() * opcoes.length)];
 }
 
-// Última live achada que está agendada fora da janela de horário — só em memória,
-// pra não chamar a API (cota) nessa mesma live a cada varredura de 10s. Reavaliada
-// em `recheckAt`: o canal às vezes reagenda a live (ex: de 09:15 pra 11:05) e sem
-// isso o bot nunca notava que ela tinha entrado na janela.
+// Última live achada que está agendada fora da janela de horário — só em memória.
+// Normalmente a janela é checada contra o horário agendado lido da página do canal
+// (sem cota, a cada varredura — reagendamento é notado em segundos). Isso aqui só
+// vale quando a página não traz o horário e foi preciso perguntar pra API: evita
+// gastar cota nessa mesma live a cada varredura, reavaliando em `recheckAt`.
 let skippedCandidate = null; // { videoId, recheckAt }
 const SKIPPED_CANDIDATE_RECHECK_MS = 10 * 60_000;
 
 function skipCandidate(videoId) {
-  const jaAvisado = skippedCandidate?.videoId === videoId;
   skippedCandidate = { videoId, recheckAt: Date.now() + SKIPPED_CANDIDATE_RECHECK_MS };
-  return jaAvisado;
 }
+
+// Loga "fora da janela" uma vez só por live+horário — a varredura repete a cada
+// poucos segundos, mas se o canal reagendar a live o novo horário aparece no log.
+let lastOutOfWindowLog = null;
+function logOutOfWindow(videoId, quando) {
+  const key = `${videoId}@${quando.getTime()}`;
+  if (key === lastOutOfWindowLog) return;
+  lastOutOfWindowLog = key;
+  log(`🕒 ${videoId} agendada pra ${horaEmBrasilia(quando)} (Brasília), fora da janela — não entra`);
+}
+
+// Quando o candidato de pré-show atual foi achado (ver PRESHOW_JUST_FOUND_MS).
+let preShowFoundAt = 0;
 
 async function tick(state, ownChannelId) {
   if (!state.videoId) {
@@ -275,6 +293,7 @@ async function tick(state, ownChannelId) {
     // poll rápido (ver PRESHOW_POLL_INTERVAL_MS), pra pegar o instante exato em
     // que vira "ao vivo de verdade" em vez de só notar até 30s depois.
     let liveVideoId = state.preShowVideoId;
+    let scrapedScheduledAt = null;
     if (!liveVideoId) {
       // dia da semana desabilitado na UI → nem varre o canal (economiza a cota
       // e evita entrar numa live num dia que a pessoa marcou que não vai estar).
@@ -284,13 +303,29 @@ async function tick(state, ownChannelId) {
       // (chat já aberto) abre antes do horário agendado, e é ali que a torcida corre
       // pra comentar primeiro — travar a varredura até a janela abrir fazia o bot só
       // chegar quando o chat já estava cheio. Varrer é scraping (sem custo de cota);
-      // a janela é aplicada abaixo, contra o horário AGENDADO da live.
-      liveVideoId = await checkChannelLive(HANDLE);
-      if (!liveVideoId) return state;
+      // a janela é aplicada contra o horário AGENDADO da live.
+      const found = await checkChannelLive(HANDLE);
+      if (!found) return state;
+      liveVideoId = found.videoId;
       // já passamos por essa live e saímos após os 15min — não entra de novo nela
       if (liveVideoId === state.attendedVideoId) return state;
-      // já vimos que essa live está agendada fora da janela — não gasta cota de novo
-      if (skippedCandidate?.videoId === liveVideoId && Date.now() < skippedCandidate.recheckAt) return state;
+      // horário agendado lido da página → janela checada a cada varredura, sem cota.
+      // O canal cria a live com o horário da criação e só depois reagenda (ex: 09:15
+      // → 11:05); antes isso só era reavaliado a cada 10min via API e a saudação
+      // chegou a sair 2h atrasada.
+      scrapedScheduledAt = found.scheduledStartTime;
+      if (scrapedScheduledAt !== null && !dentroDaJanelaDeHorario(state, new Date(scrapedScheduledAt))) {
+        logOutOfWindow(liveVideoId, new Date(scrapedScheduledAt));
+        return state;
+      }
+      // página sem horário e a API já disse que está fora da janela — não gasta cota de novo
+      if (
+        scrapedScheduledAt === null &&
+        skippedCandidate?.videoId === liveVideoId &&
+        Date.now() < skippedCandidate.recheckAt
+      ) {
+        return state;
+      }
     }
 
     const accessToken = await getAccessToken();
@@ -299,13 +334,14 @@ async function tick(state, ownChannelId) {
       // vídeo sumiu (ex: live cancelada) — esquece esse candidato e volta a varrer o canal
       return { ...state, preShowVideoId: null, pendingGreeting: null, preShowScheduledStartTime: null };
     }
-    // janela de horário (Brasília) marcada na UI, checada contra o horário agendado
-    // da live (sem agendamento, contra a hora atual). Só pra candidato novo — um
-    // candidato de pré-show já passou por esse filtro quando foi achado.
-    if (!state.preShowVideoId) {
+    // página não trouxe o horário agendado → janela checada com o da API (sem
+    // agendamento, contra a hora atual). Só pra candidato novo — um candidato de
+    // pré-show já passou por esse filtro quando foi achado.
+    if (!state.preShowVideoId && scrapedScheduledAt === null) {
       const horarioDaLive = details.scheduledStartTime ? new Date(details.scheduledStartTime) : new Date();
       if (!dentroDaJanelaDeHorario(state, horarioDaLive)) {
-        if (!skipCandidate(liveVideoId)) log(`🕒 ${liveVideoId} agendada pra ${horaEmBrasilia(horarioDaLive)} (Brasília), fora da janela — não entra`);
+        skipCandidate(liveVideoId);
+        logOutOfWindow(liveVideoId, horarioDaLive);
         return state;
       }
     }
@@ -318,6 +354,7 @@ async function tick(state, ownChannelId) {
         return { ...state, preShowVideoId: null, pendingGreeting: null, preShowScheduledStartTime: null };
       }
       log('sem activeLiveChatId ainda, tenta de novo no próximo ciclo');
+      if (state.preShowVideoId !== liveVideoId) preShowFoundAt = Date.now();
       return { ...state, preShowVideoId: liveVideoId, preShowScheduledStartTime: details.scheduledStartTime };
     }
 
@@ -564,6 +601,7 @@ async function main() {
     },
     setLiveWindow: ({ enabled, start, end }) => {
       skippedCandidate = null; // janela mudou → reavalia a live atual
+      lastOutOfWindowLog = null;
       applyUiPatch({ liveWindow: { enabled, start, end } });
       log(
         enabled
@@ -573,6 +611,7 @@ async function main() {
     },
     setLiveWindowException: (exception) => {
       skippedCandidate = null; // janela mudou → reavalia a live atual
+      lastOutOfWindowLog = null;
       applyUiPatch({
         liveWindowException: exception ? { date: exception.date, start: exception.start, end: exception.end } : null,
       });
@@ -606,7 +645,8 @@ async function main() {
         ? new Date(stateBox.current.preShowScheduledStartTime).getTime()
         : null;
       const nearStart = scheduledAt === null || Date.now() >= scheduledAt - PRESHOW_NEAR_WINDOW_MS;
-      delay = nearStart ? PRESHOW_POLL_INTERVAL_MS : PRESHOW_FAR_POLL_INTERVAL_MS;
+      const justFound = Date.now() - preShowFoundAt < PRESHOW_JUST_FOUND_MS;
+      delay = nearStart || justFound ? PRESHOW_POLL_INTERVAL_MS : PRESHOW_FAR_POLL_INTERVAL_MS;
     } else if (stateBox.current.videoId) {
       delay = ACTIVE_LIVE_POLL_INTERVAL_MS;
     }
